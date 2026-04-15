@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Minimal Twitch multiview for GitHub Pages." />
+    <meta name="theme-color" content="#000000" />
+    <title>StreamPlex</title>
+    <link rel="icon" type="image/svg+xml" href="static/icon.svg" />
+    <link rel="stylesheet" href="static/styles.css" />
+    <script src="https://player.twitch.tv/js/embed/v1.js"></script>
+    <script defer src="static/app.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <nav class="channel-bar" id="channel-bar" aria-label="Selected channels">
+        <div class="channel-list" id="channel-list" aria-label="Channel list">
+          <div class="poll-indicator is-checking" id="poll-indicator" aria-live="polite" aria-atomic="true">
+            <span class="poll-indicator-dot" aria-hidden="true"></span>
+            <span class="poll-indicator-text" id="poll-indicator-text">Checking live status</span>
+          </div>
+          <button
+            class="channel-pill channel-pill-add"
+            id="add-channel"
+            type="button"
+            aria-label="Add channels"
+            title="Add channels"
+          >
+            <span class="channel-pill-add-glyph" aria-hidden="true">+</span>
+          </button>
+        </div>
+      </nav>
+
+      <section class="stream-grid" id="stream-grid" aria-label="Streams" hidden></section>
+
+      <section class="empty-state" id="empty-state" hidden>
+        <p>No streams selected.</p>
+      </section>
+    </main>
+  </body>
+</html>

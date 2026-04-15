@@ -1,0 +1,351 @@
+:root {
+  --bg: #000;
+  --panel: #050505;
+  --line: rgba(255, 255, 255, 0.08);
+  --text: #f5f5f5;
+  --muted: #8a8a8a;
+  --tile-min-width: 280px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 system-ui, sans-serif;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  border: 0;
+}
+
+.app-shell {
+  width: 100%;
+  margin: 0 auto;
+  padding: 0.4rem;
+}
+
+.channel-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.08rem 0.3rem;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+
+.channel-list {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 0.35rem;
+  padding: 0.22rem 0 0.4rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.channel-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 1.9rem;
+  padding: 0.25rem 0.3rem 0.25rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.82rem;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.channel-pill-status {
+  display: none;
+  flex: 0 0 auto;
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-right: 0.42rem;
+  border-radius: 999px;
+}
+
+.channel-pill.is-offline {
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}
+
+.channel-pill.is-offline .channel-pill-status {
+  display: block;
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.channel-pill.is-pending .channel-pill-status {
+  display: block;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.channel-pill:hover,
+.channel-pill:focus-within {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.channel-pill-label {
+  white-space: nowrap;
+}
+
+.channel-pill-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.channel-pill-remove:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.channel-pill-add {
+  display: inline-grid;
+  place-items: center;
+  width: 1.9rem;
+  min-height: 1.9rem;
+  padding: 0;
+  line-height: 1;
+}
+
+.channel-pill-add-glyph {
+  display: block;
+  font-size: 0.92rem;
+  line-height: 1;
+  transform: translateY(-0.04rem);
+}
+
+.channel-list::-webkit-scrollbar {
+  height: 0.4rem;
+}
+
+.channel-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+
+.channel-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.poll-indicator {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0 0.1rem 0 0.35rem;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.7rem;
+  line-height: 1;
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 1;
+}
+
+.poll-indicator-dot {
+  width: 0.34rem;
+  height: 0.34rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.poll-indicator.is-checking .poll-indicator-dot {
+  background: rgba(255, 255, 255, 0.82);
+  animation: poll-pulse 1.15s ease-in-out infinite;
+}
+
+.poll-indicator.is-ok .poll-indicator-dot {
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.poll-indicator.is-error .poll-indicator-dot {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.poll-indicator.is-idle .poll-indicator-dot {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.stream-grid {
+  display: grid;
+  gap: 0.4rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--tile-min-width)), 1fr));
+}
+
+.stream-grid[hidden] {
+  display: none !important;
+}
+
+.stream-grid.stream-grid-dynamic {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: flex-start;
+  height: var(--grid-height, auto);
+}
+
+.stream-tile {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: var(--panel);
+}
+
+.stream-grid.stream-grid-dynamic .stream-tile {
+  flex: 0 0 var(--dynamic-tile-width, auto);
+  width: var(--dynamic-tile-width, auto);
+  height: var(--dynamic-tile-height, auto);
+}
+
+.stream-tile[hidden] {
+  display: none !important;
+}
+
+.stream-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.28rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.stream-name-label {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stream-audio-button {
+  flex: 0 0 auto;
+  min-height: 1.2rem;
+  padding: 0.1rem 0.42rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1;
+}
+
+.stream-audio-button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.stream-audio-button:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--text);
+}
+
+.stream-audio-button:disabled:hover {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.stream-audio-button.active {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.player-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #000;
+}
+
+.player-mount,
+.player-shell iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.stream-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 1rem;
+  gap: 0.35rem;
+  text-align: center;
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.04), transparent 34%),
+    #020202;
+}
+
+.stream-placeholder-label,
+.stream-placeholder-state {
+  display: block;
+}
+
+.stream-placeholder-label {
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.stream-placeholder-state {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.empty-state {
+  display: grid;
+  place-items: center;
+  min-height: calc(100vh - 4.5rem);
+  border: 1px dashed var(--line);
+  border-radius: 0.9rem;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.empty-state p {
+  margin: 0;
+}
+
+@keyframes poll-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+
+  50% {
+    transform: scale(1.8);
+    opacity: 1;
+  }
+}
