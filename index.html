@@ -7,15 +7,30 @@
     <meta name="theme-color" content="#000000" />
     <title>StreamPlex</title>
     <link rel="icon" type="image/svg+xml" href="static/icon.svg" />
-    <link rel="stylesheet" href="static/styles.css?v=20260510-audio-volume" />
+    <link rel="stylesheet" href="static/styles.css?v=20260510-refresh-no-dot" />
     <script src="https://player.twitch.tv/js/embed/v1.js"></script>
-    <script defer src="static/app.js?v=20260510-audio-volume"></script>
+    <script defer src="static/app.js?v=20260510-refresh-no-dot"></script>
   </head>
   <body>
     <main class="app-shell">
       <nav class="channel-bar" id="channel-bar" aria-label="Selected channels">
         <div class="channel-list" id="channel-list" aria-label="Channel list">
+          <button
+            class="channel-pill channel-pill-add"
+            id="add-channel"
+            type="button"
+            aria-label="Add channels"
+            title="Add channels"
+          >
+            <span class="channel-pill-add-glyph" aria-hidden="true">+</span>
+          </button>
+        </div>
+
+        <div class="channel-actions">
           <div class="status-controls">
+            <div class="poll-indicator is-checking" id="poll-indicator" aria-live="polite" aria-atomic="true">
+              <span class="poll-indicator-text" id="poll-indicator-text">Checking live status</span>
+            </div>
             <button
               class="theme-toggle"
               id="theme-toggle"
@@ -29,20 +44,7 @@
               </span>
               <span class="theme-toggle-label" id="theme-toggle-label">Light</span>
             </button>
-            <div class="poll-indicator is-checking" id="poll-indicator" aria-live="polite" aria-atomic="true">
-              <span class="poll-indicator-dot" aria-hidden="true"></span>
-              <span class="poll-indicator-text" id="poll-indicator-text">Checking live status</span>
-            </div>
           </div>
-          <button
-            class="channel-pill channel-pill-add"
-            id="add-channel"
-            type="button"
-            aria-label="Add channels"
-            title="Add channels"
-          >
-            <span class="channel-pill-add-glyph" aria-hidden="true">+</span>
-          </button>
         </div>
       </nav>
 
