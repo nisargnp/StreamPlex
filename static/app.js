@@ -5,11 +5,17 @@ const streamGrid = document.querySelector("#stream-grid");
 const emptyState = document.querySelector("#empty-state");
 const pollIndicator = document.querySelector("#poll-indicator");
 const pollIndicatorText = document.querySelector("#poll-indicator-text");
+const themeToggle = document.querySelector("#theme-toggle");
+const themeToggleLabel = document.querySelector("#theme-toggle-label");
+const themeColorMeta = document.querySelector('meta[name="theme-color"]');
 const currentChannels = parseInitialChannels();
 const streamViews = new Map();
 const pillViews = new Map();
 const players = new Map();
 const autoplayMonitors = new Map();
+const THEME_STORAGE_KEY = "streamplex-theme";
+const DEFAULT_ACTIVE_VOLUME = 0.5;
+const INACTIVE_VOLUME = 0;
 const POLL_INTERVAL_MS = 300000;
 const PROBE_TIMEOUT_MS = 8000;
 const FETCH_PROBE_TIMEOUT_MS = 5000;
@@ -30,7 +36,10 @@ let lastPollState = "checking";
 let autoplaySyncFrame = null;
 let autoplaySyncTimeouts = [];
 let probeSequence = 0;
+let activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
+let activeTheme = getStoredTheme();
 
+applyTheme(activeTheme);
 renderInitialView();
 bindEvents();
 startStatusPolling();
@@ -48,6 +57,12 @@ function renderInitialView() {
 }
 
 function bindEvents() {
+  if (themeToggle) {
+    themeToggle.addEventListener("click", () => {
+      setTheme(activeTheme === "light" ? "dark" : "light");
+    });
+  }
+
   if (addButton) {
     addButton.addEventListener("click", () => {
       const value = window.prompt("Add channels", "");
@@ -296,7 +311,7 @@ async function pollStreamStatuses() {
   });
 
   if (!activeStillLive) {
-    activeAudioChannel = null;
+    clearActiveAudioChannel();
   }
 
   syncPlayerAudio();
@@ -538,7 +553,7 @@ function renderOfflineStream(channel) {
   view.audioButton.disabled = true;
 
   if (activeAudioChannel === channel) {
-    activeAudioChannel = null;
+    clearActiveAudioChannel();
   }
 
   teardownPlayer(channel);
@@ -596,14 +611,51 @@ function setChannelStatus(channel, state) {
 
 function setActiveAudioChannel(channel) {
   activeAudioChannel = channel;
-  syncPlayerAudio();
+  activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
+  syncPlayerAudio({ forceActiveVolume: true });
   syncAudioButtons();
 }
 
-function syncPlayerAudio() {
+function clearActiveAudioChannel() {
+  activeAudioChannel = null;
+  activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
+}
+
+function syncPlayerAudio(options = {}) {
+  if (!options.forceActiveVolume) {
+    captureActiveAudioVolume();
+  }
+
   players.forEach((player, channel) => {
-    requestPlayerPlayback(channel, player);
+    requestPlayerPlayback(channel, player, options);
   });
+}
+
+function captureActiveAudioVolume() {
+  if (!activeAudioChannel) {
+    return;
+  }
+
+  capturePlayerAudioVolume(players.get(activeAudioChannel));
+}
+
+function capturePlayerAudioVolume(player) {
+  if (!player || typeof player.getVolume !== "function") {
+    return;
+  }
+
+  try {
+    const nextVolume = Number(player.getVolume());
+    if (Number.isFinite(nextVolume)) {
+      activeAudioVolume = clampVolume(nextVolume);
+    }
+  } catch (error) {
+    // Some player states do not expose volume yet; keep the last known active volume.
+  }
+}
+
+function clampVolume(value) {
+  return Math.min(Math.max(value, 0), 1);
 }
 
 function applyPlayerAudioState(channel, player) {
@@ -614,11 +666,15 @@ function applyPlayerAudioState(channel, player) {
   }
 
   if (typeof player.setVolume === "function") {
-    player.setVolume(isActive ? 0.5 : 0);
+    player.setVolume(isActive ? activeAudioVolume : INACTIVE_VOLUME);
   }
 }
 
-function requestPlayerPlayback(channel, player) {
+function requestPlayerPlayback(channel, player, options = {}) {
+  if (!options.forceActiveVolume && channel === activeAudioChannel) {
+    capturePlayerAudioVolume(player);
+  }
+
   applyPlayerQualityPreference(player);
   applyPlayerAudioState(channel, player);
   safelyPlayPlayer(player);
@@ -677,6 +733,53 @@ function syncAudioButtons() {
     view.audioButton.setAttribute("aria-pressed", isActive ? "true" : "false");
     view.audioButton.textContent = isActive ? "On" : "Audio";
   });
+}
+
+function getStoredTheme() {
+  let storedTheme = null;
+
+  try {
+    storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  } catch (error) {
+    storedTheme = null;
+  }
+
+  return storedTheme === "light" ? "light" : "dark";
+}
+
+function setTheme(theme) {
+  activeTheme = theme === "light" ? "light" : "dark";
+
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, activeTheme);
+  } catch (error) {
+    // Ignore storage failures; the in-memory theme still updates for this session.
+  }
+
+  applyTheme(activeTheme);
+}
+
+function applyTheme(theme) {
+  const safeTheme = theme === "light" ? "light" : "dark";
+  const isLight = safeTheme === "light";
+  const nextLabel = isLight ? "Dark" : "Light";
+  const nextTitle = isLight ? "Switch to dark mode" : "Switch to light mode";
+
+  document.documentElement.dataset.theme = safeTheme;
+
+  if (themeToggle) {
+    themeToggle.setAttribute("aria-label", nextTitle);
+    themeToggle.setAttribute("aria-pressed", isLight ? "true" : "false");
+    themeToggle.title = nextTitle;
+  }
+
+  if (themeToggleLabel) {
+    themeToggleLabel.textContent = nextLabel;
+  }
+
+  if (themeColorMeta) {
+    themeColorMeta.setAttribute("content", isLight ? "#f5f5f2" : "#000000");
+  }
 }
 
 function setPollIndicatorState(state, text) {

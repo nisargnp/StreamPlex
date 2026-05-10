@@ -2,9 +2,54 @@
   --bg: #000;
   --panel: #050505;
   --line: rgba(255, 255, 255, 0.08);
+  --line-subtle: rgba(255, 255, 255, 0.06);
+  --line-strong: rgba(255, 255, 255, 0.18);
   --text: #f5f5f5;
+  --text-strong: #fff;
   --muted: #8a8a8a;
+  --control-hover-bg: rgba(255, 255, 255, 0.08);
+  --control-active-bg: rgba(255, 255, 255, 0.08);
+  --indicator-text: rgba(255, 255, 255, 0.78);
+  --dot-idle: rgba(255, 255, 255, 0.28);
+  --dot-muted: rgba(255, 255, 255, 0.34);
+  --dot-soft: rgba(255, 255, 255, 0.4);
+  --dot-ok: rgba(255, 255, 255, 0.62);
+  --dot-checking: rgba(255, 255, 255, 0.82);
+  --offline-status: rgba(255, 255, 255, 0.38);
+  --pending-status: rgba(255, 255, 255, 0.2);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.18);
+  --scrollbar-thumb-strong: rgba(255, 255, 255, 0.22);
+  --placeholder-bg: #020202;
+  --placeholder-glow: rgba(255, 255, 255, 0.04);
+  --player-bg: #000;
   --tile-min-width: 280px;
+}
+
+html[data-theme="light"] {
+  --bg: #f5f5f2;
+  --panel: #fff;
+  --line: rgba(20, 20, 18, 0.12);
+  --line-subtle: rgba(20, 20, 18, 0.08);
+  --line-strong: rgba(20, 20, 18, 0.24);
+  --text: #151515;
+  --text-strong: #050505;
+  --muted: #696963;
+  --control-hover-bg: rgba(20, 20, 18, 0.06);
+  --control-active-bg: rgba(20, 20, 18, 0.08);
+  --indicator-text: rgba(20, 20, 18, 0.72);
+  --dot-idle: rgba(20, 20, 18, 0.24);
+  --dot-muted: rgba(20, 20, 18, 0.32);
+  --dot-soft: rgba(20, 20, 18, 0.36);
+  --dot-ok: rgba(20, 20, 18, 0.56);
+  --dot-checking: rgba(20, 20, 18, 0.78);
+  --offline-status: rgba(20, 20, 18, 0.34);
+  --pending-status: rgba(20, 20, 18, 0.18);
+  --scrollbar-thumb: rgba(20, 20, 18, 0.18);
+  --scrollbar-thumb-strong: rgba(20, 20, 18, 0.22);
+  --placeholder-bg: #f1f2f2;
+  --placeholder-glow: rgba(20, 20, 18, 0.04);
+  --player-bg: #000;
+  color-scheme: light;
 }
 
 * {
@@ -54,7 +99,7 @@ button {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  scrollbar-color: var(--scrollbar-thumb-strong) transparent;
 }
 
 .channel-pill {
@@ -84,24 +129,24 @@ button {
 }
 
 .channel-pill.is-offline {
-  border-color: rgba(255, 255, 255, 0.06);
+  border-color: var(--line-subtle);
   color: var(--muted);
 }
 
 .channel-pill.is-offline .channel-pill-status {
   display: block;
-  background: rgba(255, 255, 255, 0.38);
+  background: var(--offline-status);
 }
 
 .channel-pill.is-pending .channel-pill-status {
   display: block;
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--pending-status);
 }
 
 .channel-pill:hover,
 .channel-pill:focus-within {
-  border-color: rgba(255, 255, 255, 0.18);
-  color: #fff;
+  border-color: var(--line-strong);
+  color: var(--text-strong);
 }
 
 .channel-pill-label {
@@ -121,7 +166,7 @@ button {
 }
 
 .channel-pill-remove:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--control-hover-bg);
   color: var(--text);
 }
 
@@ -146,7 +191,7 @@ button {
 }
 
 .channel-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--scrollbar-thumb);
   border-radius: 999px;
 }
 
@@ -154,42 +199,100 @@ button {
   background: transparent;
 }
 
-.poll-indicator {
+.status-controls {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 0.42rem;
-  padding: 0 0.1rem 0 0.35rem;
-  color: rgba(255, 255, 255, 0.78);
+  padding: 0 0.1rem 0 0;
+}
+
+.poll-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  color: var(--indicator-text);
   font-size: 0.7rem;
   line-height: 1;
-  pointer-events: none;
   white-space: nowrap;
   opacity: 1;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  min-height: 1.45rem;
+  padding: 0.12rem 0.5rem 0.12rem 0.2rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1;
+  pointer-events: auto;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.theme-toggle:hover,
+.theme-toggle:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.theme-toggle-track {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 1.34rem;
+  height: 0.72rem;
+  border-radius: 999px;
+  background: var(--control-hover-bg);
+}
+
+.theme-toggle-knob {
+  position: absolute;
+  top: 50%;
+  left: 0.12rem;
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: var(--text);
+  transform: translateY(-50%);
+  transition:
+    background-color 140ms ease,
+    transform 140ms ease;
+}
+
+html[data-theme="light"] .theme-toggle-knob {
+  transform: translate(0.62rem, -50%);
 }
 
 .poll-indicator-dot {
   width: 0.34rem;
   height: 0.34rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.34);
+  background: var(--dot-muted);
 }
 
 .poll-indicator.is-checking .poll-indicator-dot {
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--dot-checking);
   animation: poll-pulse 1.15s ease-in-out infinite;
 }
 
 .poll-indicator.is-ok .poll-indicator-dot {
-  background: rgba(255, 255, 255, 0.62);
+  background: var(--dot-ok);
 }
 
 .poll-indicator.is-error .poll-indicator-dot {
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--dot-soft);
 }
 
 .poll-indicator.is-idle .poll-indicator-dot {
-  background: rgba(255, 255, 255, 0.28);
+  background: var(--dot-idle);
 }
 
 .stream-grid {
@@ -266,7 +369,7 @@ button {
 }
 
 .stream-audio-button:hover {
-  border-color: rgba(255, 255, 255, 0.18);
+  border-color: var(--line-strong);
   color: var(--text);
 }
 
@@ -276,15 +379,15 @@ button {
 }
 
 .stream-audio-button.active {
-  border-color: rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--line-strong);
+  background: var(--control-active-bg);
   color: var(--text);
 }
 
 .player-shell {
   flex: 1 1 auto;
   min-height: 0;
-  background: #000;
+  background: var(--player-bg);
 }
 
 .player-mount,
@@ -304,8 +407,8 @@ button {
   gap: 0.35rem;
   text-align: center;
   background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.04), transparent 34%),
-    #020202;
+    radial-gradient(circle at top left, var(--placeholder-glow), transparent 34%),
+    var(--placeholder-bg);
 }
 
 .stream-placeholder-label,
@@ -331,6 +434,10 @@ button {
   border-radius: 0.9rem;
   background: var(--panel);
   color: var(--muted);
+}
+
+.empty-state[hidden] {
+  display: none !important;
 }
 
 .empty-state p {

@@ -7,17 +7,32 @@
     <meta name="theme-color" content="#000000" />
     <title>StreamPlex</title>
     <link rel="icon" type="image/svg+xml" href="static/icon.svg" />
-    <link rel="stylesheet" href="static/styles.css" />
+    <link rel="stylesheet" href="static/styles.css?v=20260510-audio-volume" />
     <script src="https://player.twitch.tv/js/embed/v1.js"></script>
-    <script defer src="static/app.js"></script>
+    <script defer src="static/app.js?v=20260510-audio-volume"></script>
   </head>
   <body>
     <main class="app-shell">
       <nav class="channel-bar" id="channel-bar" aria-label="Selected channels">
         <div class="channel-list" id="channel-list" aria-label="Channel list">
-          <div class="poll-indicator is-checking" id="poll-indicator" aria-live="polite" aria-atomic="true">
-            <span class="poll-indicator-dot" aria-hidden="true"></span>
-            <span class="poll-indicator-text" id="poll-indicator-text">Checking live status</span>
+          <div class="status-controls">
+            <button
+              class="theme-toggle"
+              id="theme-toggle"
+              type="button"
+              aria-label="Switch to light mode"
+              aria-pressed="false"
+              title="Switch to light mode"
+            >
+              <span class="theme-toggle-track" aria-hidden="true">
+                <span class="theme-toggle-knob"></span>
+              </span>
+              <span class="theme-toggle-label" id="theme-toggle-label">Light</span>
+            </button>
+            <div class="poll-indicator is-checking" id="poll-indicator" aria-live="polite" aria-atomic="true">
+              <span class="poll-indicator-dot" aria-hidden="true"></span>
+              <span class="poll-indicator-text" id="poll-indicator-text">Checking live status</span>
+            </div>
           </div>
           <button
             class="channel-pill channel-pill-add"
