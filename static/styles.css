@@ -85,7 +85,9 @@ button {
   flex: 1 1 auto;
   min-width: 0;
   gap: 0.35rem;
-  padding: 0.22rem 0 0.4rem;
+  padding: 0.22rem 0.35rem 0.2rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
@@ -98,7 +100,9 @@ button {
   flex: 0 0 auto;
   gap: 0.35rem;
   margin-top: -4px;
-  padding: 0 0 0.4rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
 }
 
 .channel-pill {
