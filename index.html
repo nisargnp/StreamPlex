@@ -5,11 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Minimal Twitch multiview for GitHub Pages." />
     <meta name="theme-color" content="#000000" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>StreamPlex</title>
-    <link rel="icon" type="image/svg+xml" href="static/icon.svg" />
-    <link rel="stylesheet" href="static/styles.css?v=20260510-channel-scroll-padding" />
-    <script src="https://player.twitch.tv/js/embed/v1.js"></script>
-    <script defer src="static/app.js?v=20260510-channel-scroll-padding"></script>
+    <script>
+      const streamplexCacheBuster = Date.now().toString();
+      document.write(`<link rel="icon" type="image/svg+xml" href="static/icon.svg?v=${streamplexCacheBuster}" />`);
+      document.write(`<link rel="stylesheet" href="static/styles.css?v=${streamplexCacheBuster}" />`);
+      document.write(`<script src="https://player.twitch.tv/js/embed/v1.js?v=${streamplexCacheBuster}"><\/script>`);
+    </script>
+    <script>
+      document.write(`<script defer src="static/app.js?v=${streamplexCacheBuster}"><\/script>`);
+    </script>
   </head>
   <body>
     <main class="app-shell">

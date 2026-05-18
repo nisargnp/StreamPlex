@@ -108,6 +108,7 @@ function bindEvents() {
   }
 
   window.addEventListener("resize", syncGridLayout);
+  window.addEventListener("pageshow", handlePageShow);
 }
 
 function renderChannelPills() {
@@ -271,6 +272,36 @@ function scheduleNextPoll() {
   }
 
   pollTimer = window.setTimeout(runPollCycle, POLL_INTERVAL_MS);
+}
+
+function handlePageShow(event) {
+  if (!event.persisted || !streamViews.size) {
+    return;
+  }
+
+  [...players.keys()].forEach((channel) => {
+    teardownPlayer(channel);
+  });
+
+  streamViews.forEach((view, channel) => {
+    view.tile.hidden = false;
+    view.tile.dataset.live = "pending";
+    view.tile.dataset.mountPending = "false";
+    view.audioButton.disabled = true;
+    renderShellPlaceholder(view, channel, "Checking live status", "pending");
+    setChannelStatus(channel, "pending");
+  });
+
+  if (pollTimer) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+
+  pollInFlight = false;
+  nextPollAt = null;
+  lastPollState = "checking";
+  clearActiveAudioChannel();
+  runPollCycle();
 }
 
 async function pollStreamStatuses() {
