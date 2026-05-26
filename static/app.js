@@ -8,7 +8,15 @@ const pollIndicatorText = document.querySelector("#poll-indicator-text");
 const themeToggle = document.querySelector("#theme-toggle");
 const themeToggleLabel = document.querySelector("#theme-toggle-label");
 const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+const emptyStateText = emptyState ? emptyState.querySelector("p") : null;
+const STREAMS_QUERY_PARAM = "streams";
+const PLUTO_QUERY_PARAM = "pluto";
+const PLUTO_LIVE_TV_BASE_URL = "https://pluto.tv/us/live-tv/";
+const PLUTO_STREAM_ID_PATTERN = /^[a-f0-9]{24}$/i;
+const PLUTO_HOSTS = new Set(["pluto.tv", "www.pluto.tv"]);
 const currentChannels = parseInitialChannels();
+const currentPlutoStream = parseInitialPlutoStream();
+const currentStreams = buildStreamEntries(currentChannels, currentPlutoStream);
 const streamViews = new Map();
 const pillViews = new Map();
 const players = new Map();
@@ -35,6 +43,7 @@ let nextPollAt = null;
 let lastPollState = "checking";
 let autoplaySyncFrame = null;
 let autoplaySyncTimeouts = [];
+let layoutSyncFrame = null;
 let probeSequence = 0;
 let activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
 let activeTheme = getStoredTheme();
@@ -47,13 +56,7 @@ startStatusPolling();
 function renderInitialView() {
   renderChannelPills();
   renderStreamTiles();
-
-  emptyState.hidden = currentChannels.length !== 0;
-  streamGrid.hidden = currentChannels.length === 0;
-
-  if (currentChannels.length) {
-    syncGridLayout();
-  }
+  syncGridLayout();
 }
 
 function bindEvents() {
@@ -107,7 +110,7 @@ function bindEvents() {
     });
   }
 
-  window.addEventListener("resize", syncGridLayout);
+  window.addEventListener("resize", scheduleGridLayoutSync);
   window.addEventListener("pageshow", handlePageShow);
 }
 
@@ -163,11 +166,12 @@ function renderStreamTiles() {
 
   const fragment = document.createDocumentFragment();
 
-  currentChannels.forEach((channel) => {
+  currentStreams.forEach((stream) => {
     const tile = document.createElement("article");
     tile.className = "stream-tile";
-    tile.dataset.streamChannel = channel;
-    tile.dataset.live = "pending";
+    tile.dataset.streamChannel = stream.id;
+    tile.dataset.provider = stream.provider;
+    tile.dataset.live = isPlutoStream(stream) ? "true" : "pending";
     tile.dataset.mountPending = "false";
 
     const header = document.createElement("header");
@@ -175,36 +179,107 @@ function renderStreamTiles() {
 
     const label = document.createElement("span");
     label.className = "stream-name-label";
-    label.textContent = channel;
+    label.textContent = stream.label;
 
-    const audioButton = document.createElement("button");
-    audioButton.className = "stream-audio-button";
-    audioButton.type = "button";
-    audioButton.dataset.audioChannel = channel;
-    audioButton.setAttribute("aria-pressed", "false");
-    audioButton.disabled = true;
-    audioButton.textContent = "Audio";
+    const action = createStreamAction(stream);
 
-    header.append(label, audioButton);
+    header.append(label, action);
 
     const shell = document.createElement("div");
     shell.className = "player-shell";
-    shell.dataset.playerShell = channel;
+    shell.dataset.playerShell = stream.id;
 
     tile.append(header, shell);
     fragment.append(tile);
 
-    const view = { tile, shell, audioButton };
-    streamViews.set(channel, view);
-    renderShellPlaceholder(view, channel, "Checking live status", "pending");
+    const view = { tile, shell, audioButton: isTwitchStream(stream) ? action : null, stream };
+    streamViews.set(stream.id, view);
+
+    if (isPlutoStream(stream)) {
+      renderPlutoStream(view);
+      return;
+    }
+
+    renderShellPlaceholder(view, stream.label, "Checking live status", "pending");
   });
 
   streamGrid.append(fragment);
 }
 
+function createStreamAction(stream) {
+  if (isPlutoStream(stream)) {
+    const link = document.createElement("a");
+    link.className = "stream-audio-button stream-open-link";
+    link.href = stream.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Open";
+    link.setAttribute("aria-label", `Open ${stream.label} on Pluto TV`);
+    link.title = `Open ${stream.label} on Pluto TV`;
+    return link;
+  }
+
+  const audioButton = document.createElement("button");
+  audioButton.className = "stream-audio-button";
+  audioButton.type = "button";
+  audioButton.dataset.audioChannel = stream.id;
+  audioButton.setAttribute("aria-pressed", "false");
+  audioButton.disabled = true;
+  audioButton.textContent = "Audio";
+  return audioButton;
+}
+
+function buildStreamEntries(channels, plutoStream) {
+  const streams = channels.map((channel) => ({
+    id: channel,
+    provider: "twitch",
+    label: channel,
+    channel,
+  }));
+
+  if (plutoStream) {
+    streams.push(plutoStream);
+  }
+
+  return streams;
+}
+
+function isTwitchStream(stream) {
+  return Boolean(stream && stream.provider === "twitch");
+}
+
+function isPlutoStream(stream) {
+  return Boolean(stream && stream.provider === "pluto");
+}
+
+function isTwitchView(view) {
+  return Boolean(view && isTwitchStream(view.stream));
+}
+
+function isPlutoView(view) {
+  return Boolean(view && isPlutoStream(view.stream));
+}
+
 function parseInitialChannels() {
   const params = new URLSearchParams(window.location.search);
-  return parseChannelList(params.get("streams") || "");
+  return parseChannelList(params.get(STREAMS_QUERY_PARAM) || "");
+}
+
+function parseInitialPlutoStream() {
+  const params = new URLSearchParams(window.location.search);
+  const streamId = sanitizePlutoStreamId(params.get(PLUTO_QUERY_PARAM) || "");
+
+  if (!streamId) {
+    return null;
+  }
+
+  return {
+    id: `pluto-${streamId}`,
+    provider: "pluto",
+    label: "Pluto TV",
+    streamId,
+    url: `${PLUTO_LIVE_TV_BASE_URL}${streamId}`,
+  };
 }
 
 function parseChannelList(value) {
@@ -223,18 +298,30 @@ function mergeChannels(existingChannels, nextChannels) {
 }
 
 function navigateToChannels(channels) {
-  const nextUrl = new URL(window.location.pathname, window.location.origin);
+  window.location.assign(buildStreamUrl(channels, currentPlutoStream).toString());
+}
+
+function buildStreamUrl(channels, plutoStream) {
+  const nextUrl = new URL(window.location.href);
+
+  nextUrl.searchParams.delete(STREAMS_QUERY_PARAM);
+  nextUrl.searchParams.delete(PLUTO_QUERY_PARAM);
 
   if (channels.length) {
-    nextUrl.searchParams.set("streams", channels.join(","));
+    nextUrl.searchParams.set(STREAMS_QUERY_PARAM, channels.join(","));
   }
 
-  window.location.assign(nextUrl.toString());
+  if (plutoStream) {
+    nextUrl.searchParams.set(PLUTO_QUERY_PARAM, plutoStream.streamId);
+  }
+
+  return nextUrl;
 }
 
 function startStatusPolling() {
-  if (!streamViews.size) {
-    setPollIndicatorState("idle", "No streams selected");
+  if (!hasTwitchStreams()) {
+    stopStatusPolling();
+    setPollIndicatorState("idle", "No Twitch streams selected");
     return;
   }
 
@@ -246,6 +333,12 @@ function startStatusPolling() {
 }
 
 async function runPollCycle() {
+  if (!hasTwitchStreams()) {
+    stopStatusPolling();
+    setPollIndicatorState("idle", "No Twitch streams selected");
+    return;
+  }
+
   if (pollInFlight) {
     return;
   }
@@ -274,21 +367,42 @@ function scheduleNextPoll() {
   pollTimer = window.setTimeout(runPollCycle, POLL_INTERVAL_MS);
 }
 
+function stopStatusPolling() {
+  if (pollTimer) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+
+  if (pollTicker) {
+    window.clearInterval(pollTicker);
+    pollTicker = null;
+  }
+
+  nextPollAt = null;
+}
+
 function handlePageShow(event) {
   if (!event.persisted || !streamViews.size) {
     return;
   }
+
+  clearAutoplaySync();
 
   [...players.keys()].forEach((channel) => {
     teardownPlayer(channel);
   });
 
   streamViews.forEach((view, channel) => {
+    if (isPlutoView(view)) {
+      renderPlutoStream(view);
+      return;
+    }
+
     view.tile.hidden = false;
     view.tile.dataset.live = "pending";
     view.tile.dataset.mountPending = "false";
     view.audioButton.disabled = true;
-    renderShellPlaceholder(view, channel, "Checking live status", "pending");
+    renderShellPlaceholder(view, view.stream.label, "Checking live status", "pending");
     setChannelStatus(channel, "pending");
   });
 
@@ -301,11 +415,13 @@ function handlePageShow(event) {
   nextPollAt = null;
   lastPollState = "checking";
   clearActiveAudioChannel();
-  runPollCycle();
+  syncGridLayout();
+  startStatusPolling();
 }
 
 async function pollStreamStatuses() {
-  const channels = [...streamViews.keys()];
+  const channels = getTwitchStreamIds();
+
   if (!channels.length) {
     return;
   }
@@ -313,7 +429,7 @@ async function pollStreamStatuses() {
   const results = await Promise.all(
     channels.map(async (channel) => ({
       channel,
-      state: await probeStreamPreview(channel),
+      state: await safelyProbeStreamPreview(channel),
     }))
   );
 
@@ -348,6 +464,14 @@ async function pollStreamStatuses() {
   syncPlayerAudio();
   syncAudioButtons();
   syncGridLayout();
+}
+
+async function safelyProbeStreamPreview(channel) {
+  try {
+    return await probeStreamPreview(channel);
+  } catch (error) {
+    return "unknown";
+  }
 }
 
 async function probeStreamPreview(channel) {
@@ -455,7 +579,7 @@ function isPlaceholderPreviewUrl(value) {
 
 function retainExistingStreamState(channel) {
   const view = streamViews.get(channel);
-  if (!view || !view.shell || !view.audioButton) {
+  if (!isTwitchView(view) || !view.shell || !view.audioButton) {
     return;
   }
 
@@ -475,13 +599,13 @@ function retainExistingStreamState(channel) {
   view.audioButton.disabled = true;
 
   teardownPlayer(channel);
-  renderShellPlaceholder(view, channel, "Checking live status", "pending");
+  renderShellPlaceholder(view, view.stream.label, "Checking live status", "pending");
   setChannelStatus(channel, "pending");
 }
 
 function renderLiveStream(channel) {
   const view = streamViews.get(channel);
-  if (!view || !view.shell || !view.audioButton) {
+  if (!isTwitchView(view) || !view.shell || !view.audioButton) {
     return;
   }
 
@@ -502,6 +626,10 @@ function renderLiveStream(channel) {
 
 function mountPendingPlayers() {
   streamViews.forEach((view, channel) => {
+    if (!isTwitchView(view)) {
+      return;
+    }
+
     if (view.tile.hidden || view.tile.dataset.live !== "true" || players.has(channel)) {
       return;
     }
@@ -563,6 +691,10 @@ function mountPlayer(channel, view) {
   if (typeof player.addEventListener === "function" && Twitch.Player.PLAYBACK_BLOCKED) {
     player.addEventListener(Twitch.Player.PLAYBACK_BLOCKED, () => {
       window.setTimeout(() => {
+        if (players.get(channel) !== player) {
+          return;
+        }
+
         queuePlayerAutoplay(channel, player);
         requestPlayerPlayback(channel, player);
       }, 120);
@@ -574,7 +706,7 @@ function mountPlayer(channel, view) {
 
 function renderOfflineStream(channel) {
   const view = streamViews.get(channel);
-  if (!view || !view.shell || !view.audioButton) {
+  if (!isTwitchView(view) || !view.shell || !view.audioButton) {
     return;
   }
 
@@ -588,7 +720,28 @@ function renderOfflineStream(channel) {
   }
 
   teardownPlayer(channel);
-  renderShellPlaceholder(view, channel, "Offline", "offline");
+  renderShellPlaceholder(view, view.stream.label, "Offline", "offline");
+}
+
+function renderPlutoStream(view) {
+  if (!isPlutoView(view) || !view.shell) {
+    return;
+  }
+
+  view.tile.hidden = false;
+  view.tile.dataset.live = "true";
+  view.tile.dataset.mountPending = "false";
+  view.shell.replaceChildren();
+
+  const iframe = document.createElement("iframe");
+  iframe.className = "pluto-frame";
+  iframe.src = view.stream.url;
+  iframe.title = `${view.stream.label} on Pluto TV`;
+  iframe.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
+  iframe.allowFullscreen = true;
+  iframe.referrerPolicy = "strict-origin-when-cross-origin";
+
+  view.shell.append(iframe);
 }
 
 function renderShellPlaceholder(view, channel, message, state) {
@@ -727,8 +880,9 @@ function applyPlayerQualityPreference(player) {
       return;
     }
 
-    const availableQualities = Array.isArray(player.getQualities())
-      ? player.getQualities().filter((quality) => typeof quality === "string" && quality.length > 0)
+    const qualities = player.getQualities();
+    const availableQualities = Array.isArray(qualities)
+      ? qualities.filter((quality) => typeof quality === "string" && quality.length > 0)
       : [];
     const preferredQuality = pickPreferredQuality(availableQualities);
 
@@ -759,6 +913,10 @@ function extractQualityFps(quality) {
 
 function syncAudioButtons() {
   streamViews.forEach((view, channel) => {
+    if (!isTwitchView(view) || !view.audioButton) {
+      return;
+    }
+
     const isActive = channel === activeAudioChannel;
     view.audioButton.classList.toggle("active", isActive);
     view.audioButton.setAttribute("aria-pressed", isActive ? "true" : "false");
@@ -833,8 +991,8 @@ function updatePollIndicator() {
     return;
   }
 
-  if (!streamViews.size) {
-    setPollIndicatorState("idle", "No streams selected");
+  if (!hasTwitchStreams()) {
+    setPollIndicatorState("idle", "No Twitch streams selected");
     return;
   }
 
@@ -859,11 +1017,10 @@ function syncGridLayout() {
     return;
   }
 
-  const visibleViews = [...streamViews.values()].filter((view) => !view.tile.hidden);
-  const visibleCount = visibleViews.length;
-  streamGrid.hidden = visibleCount === 0;
+  const visibleCount = syncVisibleStreamState();
 
   if (!visibleCount) {
+    clearAutoplaySync();
     streamGrid.classList.remove("stream-grid-dynamic");
     streamGrid.style.removeProperty("--dynamic-tile-width");
     streamGrid.style.removeProperty("--dynamic-tile-height");
@@ -873,10 +1030,9 @@ function syncGridLayout() {
 
   const gap = parseFloat(window.getComputedStyle(streamGrid).columnGap || "0") || 0;
   const shellStyles = appShell ? window.getComputedStyle(appShell) : null;
-  const shellRightPadding = shellStyles ? parseFloat(shellStyles.paddingRight || "0") || 0 : 0;
   const shellBottomPadding = shellStyles ? parseFloat(shellStyles.paddingBottom || "0") || 0 : 0;
   const gridRect = streamGrid.getBoundingClientRect();
-  const gridWidth = Math.max((streamGrid.clientWidth || gridRect.width) - shellRightPadding, 0);
+  const gridWidth = Math.max(streamGrid.clientWidth || gridRect.width, 0);
   const availableHeight = Math.max(window.innerHeight - gridRect.top - shellBottomPadding - 6, 0);
   const { columns, rows } = chooseBestGrid(visibleCount, gridWidth, availableHeight, gap);
   const tileWidth = Math.max(
@@ -891,11 +1047,51 @@ function syncGridLayout() {
   streamGrid.classList.add("stream-grid-dynamic");
   streamGrid.style.setProperty("--dynamic-tile-width", `${tileWidth}px`);
   streamGrid.style.setProperty("--dynamic-tile-height", `${tileHeight}px`);
-  streamGrid.style.setProperty("--grid-height", `${rows * tileHeight + gap * Math.max(rows - 1, 0)}px`);
+  streamGrid.style.setProperty(
+    "--grid-height",
+    `${rows * tileHeight + gap * Math.max(rows - 1, 0)}px`
+  );
   window.requestAnimationFrame(() => {
     mountPendingPlayers();
-    scheduleAutoplaySync();
+    if (players.size) {
+      scheduleAutoplaySync();
+    } else {
+      clearAutoplaySync();
+    }
   });
+}
+
+function scheduleGridLayoutSync() {
+  if (layoutSyncFrame) {
+    window.cancelAnimationFrame(layoutSyncFrame);
+  }
+
+  layoutSyncFrame = window.requestAnimationFrame(() => {
+    layoutSyncFrame = null;
+    syncGridLayout();
+  });
+}
+
+function syncVisibleStreamState() {
+  const visibleCount = [...streamViews.values()].filter(
+    (view) => view.tile && !view.tile.hidden
+  ).length;
+
+  if (streamGrid) {
+    streamGrid.hidden = visibleCount === 0;
+  }
+
+  if (emptyState) {
+    emptyState.hidden = visibleCount !== 0;
+  }
+
+  if (emptyStateText) {
+    emptyStateText.textContent = currentStreams.length
+      ? "No live Twitch streams."
+      : "No streams selected.";
+  }
+
+  return visibleCount;
 }
 
 function chooseBestGrid(count, width, height, gap) {
@@ -929,7 +1125,7 @@ function chooseBestGrid(count, width, height, gap) {
 function autoplayVisiblePlayers() {
   players.forEach((player, channel) => {
     const view = streamViews.get(channel);
-    if (!view || view.tile.hidden || !hasPlayableArea(view.shell)) {
+    if (!isTwitchView(view) || view.tile.hidden || !hasPlayableArea(view.shell)) {
       return;
     }
 
@@ -977,7 +1173,12 @@ function queuePlayerAutoplay(channel, player) {
 
   const kick = () => {
     const view = streamViews.get(channel);
-    if (!view || view.tile.hidden || !hasPlayableArea(view.shell)) {
+    if (
+      players.get(channel) !== player ||
+      !isTwitchView(view) ||
+      view.tile.hidden ||
+      !hasPlayableArea(view.shell)
+    ) {
       return;
     }
 
@@ -1009,6 +1210,16 @@ function clearPlayerAutoplay(channel) {
   autoplayMonitors.delete(channel);
 }
 
+function clearAutoplaySync() {
+  if (autoplaySyncFrame) {
+    window.cancelAnimationFrame(autoplaySyncFrame);
+    autoplaySyncFrame = null;
+  }
+
+  autoplaySyncTimeouts.forEach((timer) => window.clearTimeout(timer));
+  autoplaySyncTimeouts = [];
+}
+
 function hasPlayableArea(element) {
   if (!element) {
     return false;
@@ -1023,6 +1234,28 @@ function isChannelVisible(channel) {
   return Boolean(view && !view.tile.hidden && view.tile.dataset.live === "true");
 }
 
+function hasTwitchStreams() {
+  for (const view of streamViews.values()) {
+    if (isTwitchView(view)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getTwitchStreamIds() {
+  const channels = [];
+
+  streamViews.forEach((view, channel) => {
+    if (isTwitchView(view)) {
+      channels.push(channel);
+    }
+  });
+
+  return channels;
+}
+
 function parseChannels(value) {
   const trimmedValue = value.trim();
   let source = trimmedValue;
@@ -1030,7 +1263,7 @@ function parseChannels(value) {
   if (/^https?:\/\//i.test(trimmedValue)) {
     try {
       const url = new URL(trimmedValue);
-      source = url.searchParams.get("streams") || "";
+      source = url.searchParams.get(STREAMS_QUERY_PARAM) || "";
     } catch (error) {
       source = "";
     }
@@ -1041,4 +1274,21 @@ function parseChannels(value) {
 
 function sanitizeChannel(value) {
   return value.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+}
+
+function sanitizePlutoStreamId(value) {
+  const trimmedValue = value.trim();
+  let candidate = trimmedValue;
+
+  if (/^https?:\/\//i.test(trimmedValue)) {
+    try {
+      const url = new URL(trimmedValue);
+      const pathMatch = url.pathname.match(/^\/us\/live-tv\/([^/?#]+)\/?$/i);
+      candidate = PLUTO_HOSTS.has(url.hostname.toLowerCase()) && pathMatch ? pathMatch[1] : "";
+    } catch (error) {
+      candidate = "";
+    }
+  }
+
+  return PLUTO_STREAM_ID_PATTERN.test(candidate) ? candidate.toLowerCase() : "";
 }
