@@ -367,14 +367,17 @@ html[data-theme="light"] .theme-toggle-knob {
 }
 
 .stream-tile[data-provider="pluto"] .player-shell {
-  --pluto-frame-scale: 7;
-  --pluto-frame-y: 85%;
+  --pluto-frame-width: 1280px;
+  --pluto-frame-height: 720px;
+  --pluto-frame-scale: 1;
+  --pluto-frame-x: 0px;
+  --pluto-frame-y: 0px;
   position: relative;
   overflow: hidden;
 }
 
 .player-mount,
-.player-shell iframe {
+.player-shell iframe:not(.pluto-frame) {
   display: block;
   width: 100%;
   height: 100%;
@@ -382,10 +385,18 @@ html[data-theme="light"] .theme-toggle-knob {
 }
 
 .pluto-frame {
+  display: block;
   position: absolute;
-  inset: 0;
-  transform: translateY(var(--pluto-frame-y)) scale(var(--pluto-frame-scale));
-  transform-origin: center center;
+  top: 0;
+  left: 0;
+  width: var(--pluto-frame-width);
+  height: var(--pluto-frame-height);
+  border: 0;
+  max-width: none;
+  transform:
+    translate(var(--pluto-frame-x), var(--pluto-frame-y))
+    scale(var(--pluto-frame-scale));
+  transform-origin: top left;
 }
 
 .stream-placeholder {

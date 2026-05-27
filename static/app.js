@@ -28,6 +28,21 @@ const POLL_INTERVAL_MS = 300000;
 const PROBE_TIMEOUT_MS = 8000;
 const FETCH_PROBE_TIMEOUT_MS = 5000;
 const PREFERRED_QUALITY_PATTERN = /^480p(?:\d+)?$/i;
+// Pluto is cross-origin, so crop the full page iframe as an opaque visual surface.
+const PLUTO_FRAME_WIDTH = 1280;
+const PLUTO_FRAME_HEIGHT = 720;
+// "contain" preserves the calibrated crop; "cover" fills odd-shaped boxes by cropping more.
+const PLUTO_CROP_FIT = "contain";
+const PLUTO_CROP_RECT = {
+  x: 240,
+  y: 47.571,
+  width: 800,
+  height: 450,
+};
+const PLUTO_FRAME_OFFSET = {
+  x: 0,
+  y: 0.05,
+};
 const PREVIEW_PLACEHOLDER_PATTERNS = [
   /\/ttv-static\/404_/i,
   /\/ttv-static\/403_/i,
@@ -44,6 +59,9 @@ let lastPollState = "checking";
 let autoplaySyncFrame = null;
 let autoplaySyncTimeouts = [];
 let layoutSyncFrame = null;
+let plutoCropSyncFrame = null;
+let plutoResizeObserver = null;
+const pendingPlutoCropShells = new Set();
 let probeSequence = 0;
 let activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
 let activeTheme = getStoredTheme();
@@ -742,6 +760,114 @@ function renderPlutoStream(view) {
   iframe.referrerPolicy = "strict-origin-when-cross-origin";
 
   view.shell.append(iframe);
+  observePlutoShell(view.shell);
+  syncPlutoCrop(view.shell);
+}
+
+function observePlutoShell(shell) {
+  if (!shell || typeof ResizeObserver === "undefined") {
+    return;
+  }
+
+  if (!plutoResizeObserver) {
+    plutoResizeObserver = new ResizeObserver((entries) => {
+      entries.forEach((entry) => {
+        schedulePlutoCropSync(entry.target);
+      });
+    });
+  }
+
+  plutoResizeObserver.observe(shell);
+}
+
+function schedulePlutoCropSync(shell) {
+  if (shell) {
+    pendingPlutoCropShells.add(shell);
+  } else {
+    streamViews.forEach((view) => {
+      if (isPlutoView(view) && view.shell) {
+        pendingPlutoCropShells.add(view.shell);
+      }
+    });
+  }
+
+  if (plutoCropSyncFrame) {
+    return;
+  }
+
+  plutoCropSyncFrame = window.requestAnimationFrame(() => {
+    plutoCropSyncFrame = null;
+    const shells = [...pendingPlutoCropShells];
+    pendingPlutoCropShells.clear();
+    shells.forEach((entry) => syncPlutoCrop(entry));
+  });
+}
+
+function syncAllPlutoCrops() {
+  streamViews.forEach((view) => {
+    if (isPlutoView(view) && view.shell) {
+      syncPlutoCrop(view.shell);
+    }
+  });
+}
+
+function syncPlutoCrop(shell) {
+  if (!shell || !shell.querySelector(".pluto-frame")) {
+    return;
+  }
+
+  const rect = shell.getBoundingClientRect();
+  const shellWidth = Math.max(rect.width || shell.clientWidth || 0, 0);
+  const shellHeight = Math.max(rect.height || shell.clientHeight || 0, 0);
+
+  if (shellWidth <= 0 || shellHeight <= 0) {
+    return;
+  }
+
+  const scale = getPlutoCropScale(shellWidth, shellHeight);
+  const x =
+    (shellWidth - PLUTO_CROP_RECT.width * scale) / 2 -
+    PLUTO_CROP_RECT.x * scale +
+    shellWidth * PLUTO_FRAME_OFFSET.x;
+  const y =
+    (shellHeight - PLUTO_CROP_RECT.height * scale) / 2 -
+    PLUTO_CROP_RECT.y * scale +
+    shellHeight * PLUTO_FRAME_OFFSET.y;
+
+  shell.style.setProperty("--pluto-frame-width", `${PLUTO_FRAME_WIDTH}px`);
+  shell.style.setProperty("--pluto-frame-height", `${PLUTO_FRAME_HEIGHT}px`);
+  shell.style.setProperty("--pluto-frame-scale", formatCssNumber(scale));
+  shell.style.setProperty("--pluto-frame-x", formatCssPixels(x));
+  shell.style.setProperty("--pluto-frame-y", formatCssPixels(y));
+}
+
+function getPlutoCropScale(shellWidth, shellHeight) {
+  const widthScale = shellWidth / PLUTO_CROP_RECT.width;
+  const heightScale = shellHeight / PLUTO_CROP_RECT.height;
+
+  if (PLUTO_CROP_FIT === "cover") {
+    return Math.max(widthScale, heightScale);
+  }
+
+  return Math.min(widthScale, heightScale);
+}
+
+function formatCssNumber(value) {
+  if (!Number.isFinite(value)) {
+    return "1";
+  }
+
+  const formattedValue = value.toFixed(4).replace(/\.?0+$/, "");
+  return formattedValue || "0";
+}
+
+function formatCssPixels(value) {
+  if (!Number.isFinite(value)) {
+    return "0px";
+  }
+
+  const formattedValue = value.toFixed(3).replace(/\.?0+$/, "");
+  return `${formattedValue || "0"}px`;
 }
 
 function renderShellPlaceholder(view, channel, message, state) {
@@ -1051,6 +1177,7 @@ function syncGridLayout() {
     "--grid-height",
     `${rows * tileHeight + gap * Math.max(rows - 1, 0)}px`
   );
+  syncAllPlutoCrops();
   window.requestAnimationFrame(() => {
     mountPendingPlayers();
     if (players.size) {

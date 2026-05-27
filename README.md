@@ -34,6 +34,8 @@ Raw stream ids are the canonical URL format. Encoded Pluto live URLs from `pluto
 
 If `pluto` is omitted or the stream id is invalid, the Pluto tile is hidden. Pluto playback is embedded in an iframe, so its audio and playback controls are managed inside Pluto's player rather than through Streamplex's Twitch audio button.
 
+Pluto TV is rendered as a cross-origin page iframe. Streamplex cannot inspect Pluto's internal player, so it visually crops a calibrated region of the iframe inside the stream box. If Pluto changes its page layout, the crop constants in `static/app.js` may need retuning.
+
 ## Local Preview
 
 Twitch embeds should be served over HTTP, not opened directly from `file://`.
