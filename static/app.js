@@ -15,16 +15,19 @@ const PLUTO_LIVE_TV_BASE_URL = "https://pluto.tv/us/watch/live-tv/";
 const PLUTO_LEGACY_LIVE_TV_BASE_URL = "https://pluto.tv/us/live-tv/";
 const PLUTO_STREAM_ID_PATTERN = /^(?:[1-9][0-9]*|[a-f0-9]{24})$/i;
 const PLUTO_HOSTS = new Set(["pluto.tv", "www.pluto.tv"]);
-const currentChannels = parseInitialChannels();
-const currentPlutoStream = parseInitialPlutoStream();
-const currentStreams = buildStreamEntries(currentChannels, currentPlutoStream);
+let currentChannels = parseInitialChannels();
+let currentPlutoStream = parseInitialPlutoStream();
+let currentStreams = buildStreamEntries(currentChannels, currentPlutoStream);
 const streamViews = new Map();
 const pillViews = new Map();
 const players = new Map();
-const autoplayMonitors = new Map();
+const audioVolumes = new Map();
+const probeControllers = new Set();
+const APP_VERSION = "2026-09-11.3";
+const TWITCH_VIEWPORT_WIDTH = 400;
+const TWITCH_VIEWPORT_HEIGHT = 300;
 const THEME_STORAGE_KEY = "streamplex-theme";
 const DEFAULT_ACTIVE_VOLUME = 0.5;
-const INACTIVE_VOLUME = 0;
 const POLL_INTERVAL_MS = 300000;
 const PROBE_TIMEOUT_MS = 8000;
 const FETCH_PROBE_TIMEOUT_MS = 5000;
@@ -42,11 +45,11 @@ let pollTicker = null;
 let pollInFlight = false;
 let nextPollAt = null;
 let lastPollState = "checking";
-let autoplaySyncFrame = null;
-let autoplaySyncTimeouts = [];
 let layoutSyncFrame = null;
 let plutoModulePromise;
-let probeSequence = 0;
+let twitchSdkPromise;
+let pollEpoch = 0;
+let audioMonitor = null;
 let activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
 let activeTheme = getStoredTheme();
 
@@ -56,8 +59,8 @@ bindEvents();
 startStatusPolling();
 
 function renderInitialView() {
-  renderChannelPills();
   renderStreamTiles();
+  renderChannelPills();
   syncGridLayout();
 }
 
@@ -75,8 +78,8 @@ function bindEvents() {
         return;
       }
 
-      const nextChannels = mergeChannels(currentChannels, parseChannels(value));
-      navigateToChannels(nextChannels);
+      const selection = parseAddedSelection(value);
+      navigateToChannels(mergeChannels(currentChannels, selection.channels), selection.pluto ?? currentPlutoStream);
     });
   }
 
@@ -87,7 +90,11 @@ function bindEvents() {
         return;
       }
 
-      const channel = sanitizeChannel(button.dataset.removeChannel || "");
+      const channel = button.dataset.removeChannel || "";
+      if (channel === currentPlutoStream?.id) {
+        navigateToChannels(currentChannels, null);
+        return;
+      }
       if (!channel) {
         return;
       }
@@ -103,8 +110,8 @@ function bindEvents() {
         return;
       }
 
-      const channel = sanitizeChannel(button.dataset.audioChannel || "");
-      if (!channel) {
+      const channel = button.dataset.audioChannel || "";
+      if (!streamViews.has(channel)) {
         return;
       }
 
@@ -114,8 +121,14 @@ function bindEvents() {
 
   window.addEventListener("resize", scheduleGridLayoutSync);
   window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("popstate", () => updateSelection(parseInitialChannels(), parseInitialPlutoStream()));
+  document.querySelector("#refresh-streams")?.addEventListener("click", () => runPollCycle());
   window.addEventListener("pagehide", () => {
+    stopStatusPolling();
+    [...players.keys()].forEach(teardownPlayer);
     streamViews.forEach(disposePlutoView);
+    window.clearInterval(audioMonitor);
+    audioMonitor = null;
   });
 }
 
@@ -130,7 +143,8 @@ function renderChannelPills() {
 
   const fragment = document.createDocumentFragment();
 
-  currentChannels.forEach((channel) => {
+  currentStreams.forEach((stream) => {
+    const channel = stream.id;
     const pill = document.createElement("div");
     pill.className = "channel-pill is-pending";
     pill.dataset.channelPill = channel;
@@ -142,7 +156,7 @@ function renderChannelPills() {
 
     const label = document.createElement("span");
     label.className = "channel-pill-label";
-    label.textContent = channel;
+    label.textContent = stream.label;
 
     const removeButton = document.createElement("button");
     removeButton.className = "channel-pill-remove";
@@ -158,27 +172,37 @@ function renderChannelPills() {
   });
 
   channelList.append(fragment);
+  streamViews.forEach((view, id) => setChannelStatus(id, view.tile.dataset.live === "true" ? "live" : view.tile.dataset.live === "false" ? "offline" : "pending"));
 }
 
 function renderStreamTiles() {
-  streamViews.forEach(disposePlutoView);
-  streamViews.clear();
-
   if (!streamGrid) {
     return;
   }
 
-  streamGrid.replaceChildren();
-
-  const fragment = document.createDocumentFragment();
-
-  currentStreams.forEach((stream) => {
+  const wanted = new Set(currentStreams.map((stream) => stream.id));
+  streamViews.forEach((view, id) => {
+    if (wanted.has(id)) return;
+    teardownPlayer(id);
+    disposePlutoView(view);
+    view.tile.remove();
+    streamViews.delete(id);
+    audioVolumes.delete(id);
+    if (activeAudioChannel === id) activeAudioChannel = null;
+  });
+  currentStreams.forEach((stream, index) => {
+    const existing = streamViews.get(stream.id);
+    if (existing) {
+      existing.tile.style.order = String(index);
+      return;
+    }
     const tile = document.createElement("article");
     tile.className = "stream-tile";
     tile.dataset.streamChannel = stream.id;
     tile.dataset.provider = stream.provider;
     tile.dataset.live = isPlutoStream(stream) ? "true" : "pending";
     tile.dataset.mountPending = "false";
+    tile.style.order = String(index);
 
     const header = document.createElement("header");
     header.className = "stream-name";
@@ -189,16 +213,25 @@ function renderStreamTiles() {
 
     const action = createStreamAction(stream);
 
-    header.append(label, action);
+    const audioButton = createAudioButton(stream);
+    if (isPlutoStream(stream)) {
+      const actions = document.createElement("div");
+      actions.className = "stream-actions";
+      actions.append(audioButton, action);
+      header.append(label, actions);
+    } else {
+      header.append(label, audioButton);
+    }
 
     const shell = document.createElement("div");
     shell.className = "player-shell";
     shell.dataset.playerShell = stream.id;
 
     tile.append(header, shell);
-    fragment.append(tile);
+    // Never reparent an existing iframe: even moving it can restart playback.
+    streamGrid.append(tile);
 
-    const view = { tile, shell, audioButton: isTwitchStream(stream) ? action : null, stream };
+    const view = { tile, shell, audioButton, stream, userPaused: false, ready: false };
     streamViews.set(stream.id, view);
 
     if (isPlutoStream(stream)) {
@@ -209,7 +242,6 @@ function renderStreamTiles() {
     renderShellPlaceholder(view, stream.label, "Checking live status", "pending");
   });
 
-  streamGrid.append(fragment);
 }
 
 function createStreamAction(stream) {
@@ -225,6 +257,10 @@ function createStreamAction(stream) {
     return link;
   }
 
+  return createAudioButton(stream);
+}
+
+function createAudioButton(stream) {
   const audioButton = document.createElement("button");
   audioButton.className = "stream-audio-button";
   audioButton.type = "button";
@@ -232,6 +268,7 @@ function createStreamAction(stream) {
   audioButton.setAttribute("aria-pressed", "false");
   audioButton.disabled = true;
   audioButton.textContent = "Audio";
+  audioButton.setAttribute("aria-label", `Listen to ${stream.label}`);
   return audioButton;
 }
 
@@ -278,7 +315,10 @@ function parseInitialPlutoStream() {
   if (!streamId) {
     return null;
   }
+  return makePlutoStream(streamId);
+}
 
+function makePlutoStream(streamId) {
   // Legacy IDs still resolve through Pluto's redirect to the new numeric ID.
   const baseUrl = /^[a-f0-9]{24}$/i.test(streamId)
     ? PLUTO_LEGACY_LIVE_TV_BASE_URL
@@ -308,8 +348,35 @@ function mergeChannels(existingChannels, nextChannels) {
   return [...new Set([...existingChannels, ...nextChannels])];
 }
 
-function navigateToChannels(channels) {
-  window.location.assign(buildStreamUrl(channels, currentPlutoStream).toString());
+function navigateToChannels(channels, plutoStream = currentPlutoStream) {
+  const next = buildStreamUrl(channels, plutoStream);
+  if (next.href !== window.location.href) window.history.pushState(null, "", next);
+  updateSelection(channels, plutoStream);
+}
+
+function updateSelection(channels, plutoStream) {
+  stopStatusPolling();
+  currentChannels = channels;
+  currentPlutoStream = plutoStream;
+  currentStreams = buildStreamEntries(channels, plutoStream);
+  renderStreamTiles();
+  renderChannelPills();
+  syncGridLayout();
+  syncAudioButtons();
+  startStatusPolling();
+}
+
+function parseAddedSelection(value) {
+  const text = value.trim();
+  let pluto;
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      const url = new URL(text);
+      const id = sanitizePlutoStreamId(url.searchParams.get("pluto") || text);
+      if (id) pluto = makePlutoStream(id);
+    } catch { /* Invalid URLs add nothing. */ }
+  }
+  return { channels: parseChannels(text), pluto };
 }
 
 function buildStreamUrl(channels, plutoStream) {
@@ -355,14 +422,17 @@ async function runPollCycle() {
   }
 
   pollInFlight = true;
+  const epoch = pollEpoch;
   setPollIndicatorState("checking", "Checking live status");
 
   try {
-    await pollStreamStatuses();
-    lastPollState = "ok";
+    const complete = await pollStreamStatuses(epoch);
+    if (epoch !== pollEpoch) return;
+    lastPollState = complete ? "ok" : "error";
   } catch (error) {
     lastPollState = "error";
   } finally {
+    if (epoch !== pollEpoch) return;
     pollInFlight = false;
     nextPollAt = Date.now() + POLL_INTERVAL_MS;
     scheduleNextPoll();
@@ -379,6 +449,10 @@ function scheduleNextPoll() {
 }
 
 function stopStatusPolling() {
+  pollEpoch += 1;
+  probeControllers.forEach((controller) => controller.abort());
+  probeControllers.clear();
+  pollInFlight = false;
   if (pollTimer) {
     window.clearTimeout(pollTimer);
     pollTimer = null;
@@ -396,8 +470,6 @@ function handlePageShow(event) {
   if (!event.persisted || !streamViews.size) {
     return;
   }
-
-  clearAutoplaySync();
 
   [...players.keys()].forEach((channel) => {
     teardownPlayer(channel);
@@ -425,56 +497,51 @@ function handlePageShow(event) {
   pollInFlight = false;
   nextPollAt = null;
   lastPollState = "checking";
-  clearActiveAudioChannel();
   syncGridLayout();
   startStatusPolling();
 }
 
-async function pollStreamStatuses() {
+async function pollStreamStatuses(epoch = pollEpoch) {
   const channels = getTwitchStreamIds();
 
   if (!channels.length) {
-    return;
+    return true;
   }
 
+  // Process each result immediately; one slow thumbnail must not hold back
+  // all the other players. A mounted SDK is a better status source than images.
   const results = await Promise.all(
-    channels.map(async (channel) => ({
-      channel,
-      state: await safelyProbeStreamPreview(channel),
-    }))
-  );
-
-  let activeStillLive = false;
-
-  results.forEach(({ channel, state }) => {
-    if (state === "live") {
-      renderLiveStream(channel);
-      setChannelStatus(channel, "live");
-      if (channel === activeAudioChannel) {
-        activeStillLive = true;
+    channels.map(async (channel) => {
+      const view = streamViews.get(channel);
+      if (players.has(channel)) return view.ready && !view.playbackError;
+      if (view.tile.dataset.mountPending === "loading" || view.playbackError) return false;
+      const state = await safelyProbeStreamPreview(channel);
+      if (epoch !== pollEpoch || streamViews.get(channel) !== view) return false;
+      if (state === "offline") {
+        renderOfflineStream(channel);
+        setChannelStatus(channel, "offline");
+      } else {
+        // Unknown never means offline. Let the official embedded player decide.
+        renderLiveStream(channel);
+        setChannelStatus(channel, state === "live" ? "live" : "pending");
       }
-      return;
-    }
+      syncGridLayout();
+      return state !== "unknown";
+    })
+  );
+  return results.every(Boolean) || twitchStatusesResolved();
+}
 
-    if (state === "offline") {
-      renderOfflineStream(channel);
-      setChannelStatus(channel, "offline");
-      return;
-    }
-
-    retainExistingStreamState(channel);
-    if (channel === activeAudioChannel && isChannelVisible(channel)) {
-      activeStillLive = true;
-    }
+function twitchStatusesResolved() {
+  return getTwitchStreamIds().every((id) => {
+    const view = streamViews.get(id);
+    return !view.playbackError && (view.ready || view.tile.dataset.live === "false");
   });
+}
 
-  if (!activeStillLive) {
-    clearActiveAudioChannel();
-  }
-
-  syncPlayerAudio();
-  syncAudioButtons();
-  syncGridLayout();
+function refreshStatusFromPlayers() {
+  if (twitchStatusesResolved()) lastPollState = "ok";
+  updatePollIndicator();
 }
 
 async function safelyProbeStreamPreview(channel) {
@@ -486,8 +553,7 @@ async function safelyProbeStreamPreview(channel) {
 }
 
 async function probeStreamPreview(channel) {
-  const cacheToken = `${Date.now()}-${probeSequence}`;
-  probeSequence += 1;
+  const cacheToken = Math.floor(Date.now() / POLL_INTERVAL_MS);
 
   const previewUrl = `${buildPreviewUrl(channel)}?cb=${cacheToken}`;
   const fetchState = await probeStreamPreviewViaFetch(previewUrl);
@@ -496,7 +562,7 @@ async function probeStreamPreview(channel) {
     return fetchState;
   }
 
-  return probeStreamPreviewViaImage(previewUrl);
+  return "unknown";
 }
 
 function buildPreviewUrl(channel) {
@@ -509,6 +575,7 @@ async function probeStreamPreviewViaFetch(previewUrl) {
   }
 
   const abortController = new AbortController();
+  probeControllers.add(abortController);
   const timeoutId = window.setTimeout(() => {
     abortController.abort();
   }, FETCH_PROBE_TIMEOUT_MS);
@@ -517,7 +584,7 @@ async function probeStreamPreviewViaFetch(previewUrl) {
     const response = await fetch(previewUrl, {
       method: "GET",
       mode: "cors",
-      cache: "no-store",
+      cache: "default",
       signal: abortController.signal,
     });
 
@@ -525,12 +592,13 @@ async function probeStreamPreviewViaFetch(previewUrl) {
       return "unknown";
     }
 
-    if (response.status === 403 || response.status === 404) {
+    if (response.status === 404) {
       return "offline";
     }
+    if (!response.ok) return "unknown";
 
     if (isPlaceholderPreviewUrl(response.url)) {
-      return "offline";
+      return /403_|forbidden/i.test(response.url) ? "unknown" : "offline";
     }
 
     if (response.ok) {
@@ -542,6 +610,7 @@ async function probeStreamPreviewViaFetch(previewUrl) {
     return "unknown";
   } finally {
     window.clearTimeout(timeoutId);
+    probeControllers.delete(abortController);
   }
 }
 
@@ -576,10 +645,10 @@ function probeStreamPreviewViaImage(previewUrl) {
         return;
       }
 
-      finish(image.naturalWidth > 0 && image.naturalHeight > 0 ? "live" : "offline");
+      finish("unknown");
     };
 
-    image.onerror = () => finish("offline");
+    image.onerror = () => finish("unknown");
     image.src = previewUrl;
   });
 }
@@ -653,66 +722,203 @@ function mountPendingPlayers() {
   });
 }
 
-function mountPlayer(channel, view) {
-  view.tile.dataset.mountPending = "false";
-
-  if (typeof Twitch === "undefined" || typeof Twitch.Player === "undefined") {
-    retainExistingStreamState(channel);
-    return;
+function loadTwitchSdk() {
+  if (window.Twitch?.Player) return Promise.resolve(window.Twitch);
+  if (!twitchSdkPromise) {
+    twitchSdkPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (error) { script.remove(); reject(error); }
+        else resolve(window.Twitch);
+      };
+      const timer = window.setTimeout(() => finish(new Error("Twitch player download timed out.")), 15000);
+      script.src = "https://player.twitch.tv/js/embed/v1.js";
+      script.async = true;
+      script.onload = () => finish(window.Twitch?.Player ? null : new Error("Twitch player is unavailable."));
+      script.onerror = () => finish(new Error("Could not load Twitch. Check your connection or blocker settings."));
+      document.head.append(script);
+    }).catch((error) => { twitchSdkPromise = null; throw error; });
   }
+  return twitchSdkPromise;
+}
 
-  view.shell.replaceChildren();
+function createTwitchPlayer(SDK, mountId, options, view) {
+  // The current SDK's destroy() leaves an internal bound message listener.
+  // Capture only listeners registered synchronously by this constructor so
+  // they can be removed with their exact identities. Restore the API even if
+  // construction throws; unrelated listeners are never touched.
+  const add = window.addEventListener;
+  view.sdkListeners = [];
+  window.addEventListener = function(type, listener, options) {
+    if (type === "message") view.sdkListeners.push({ listener, options });
+    return add.call(this, type, listener, options);
+  };
+  try {
+    return new SDK.Player(mountId, options);
+  } finally {
+    window.addEventListener = add;
+  }
+}
 
-  const mount = document.createElement("div");
-  mount.className = "player-mount";
-  mount.id = `player-${channel}`;
-  view.shell.append(mount);
-
-  const player = new Twitch.Player(mount.id, {
-    channel,
-    width: "100%",
-    height: "100%",
-    parent: [window.location.hostname || "127.0.0.1"],
-    autoplay: true,
-    muted: true,
-  });
-
-  players.set(channel, player);
-
-  if (typeof player.addEventListener === "function" && Twitch.Player.READY) {
-    player.addEventListener(Twitch.Player.READY, () => {
-      queuePlayerAutoplay(channel, player);
+async function mountPlayer(channel, view) {
+  if (view.tile.dataset.mountPending === "loading") return;
+  view.tile.dataset.mountPending = "loading";
+  const generation = view.mountGeneration = (view.mountGeneration || 0) + 1;
+  try {
+    const SDK = await loadTwitchSdk();
+    if (streamViews.get(channel) !== view || generation !== view.mountGeneration) return;
+    view.shell.replaceChildren();
+    const mount = document.createElement("div");
+    mount.className = "player-mount";
+    mount.id = `player-${channel}`;
+    view.shell.append(mount);
+    view.playerMount = mount;
+    syncTwitchPlayerSize(view);
+    if (typeof ResizeObserver !== "undefined") {
+      view.playerResizeObserver = new ResizeObserver(() => syncTwitchPlayerSize(view));
+      view.playerResizeObserver.observe(view.shell);
+    }
+    const player = createTwitchPlayer(SDK, mount.id, {
+      channel, width: "100%", height: "100%",
+      parent: [window.location.hostname || "127.0.0.1"],
+      autoplay: !view.userPaused, muted: true,
+    }, view);
+    players.set(channel, player);
+    view.tile.dataset.mountPending = "false";
+    view.playbackError = false;
+    view.ready = false;
+    view.hasPlayed = false;
+    view.qualityInitialized = false;
+    view.playerEvents = [];
+    const on = (event, handler) => {
+      if (!event) return;
+      const guarded = (...args) => { if (players.get(channel) === player) handler(...args); };
+      player.addEventListener(event, guarded);
+      view.playerEvents.push({ event, handler: guarded });
+    };
+    const clearWatchdog = () => window.clearTimeout(view.startupTimer);
+    view.startupTimer = view.userPaused ? null : window.setTimeout(() => showTwitchFailure(channel, "Twitch did not start. Retry playback or open the channel directly."), 30000);
+    on(SDK.Player.READY, () => {
+      view.ready = true;
+      refreshStatusFromPlayers();
+      view.audioButton.disabled = false;
+      initializePlayerQuality(view, player);
+      applyPlayerAudioState(channel, player);
       requestPlayerPlayback(channel, player);
+      startAudioMonitor();
     });
-  }
-
-  if (typeof player.addEventListener === "function" && Twitch.Player.ONLINE) {
-    player.addEventListener(Twitch.Player.ONLINE, () => {
-      queuePlayerAutoplay(channel, player);
-      requestPlayerPlayback(channel, player);
+    on(SDK.Player.ONLINE, () => {
+      view.tile.hidden = false;
+      view.tile.dataset.live = "true";
+      setChannelStatus(channel, "live");
+      syncGridLayout();
+      if (view.ready) requestPlayerPlayback(channel, player);
     });
-  }
-
-  if (typeof player.addEventListener === "function" && Twitch.Player.PLAYING) {
-    player.addEventListener(Twitch.Player.PLAYING, () => {
-      clearPlayerAutoplay(channel);
+    on(SDK.Player.OFFLINE, () => {
+      clearWatchdog();
+      // Keep the selected offline player to receive ONLINE without five-minute
+      // thumbnail guesses or repeated SDK construction. Destroy it on removal.
+      view.tile.hidden = true;
+      view.tile.dataset.live = "false";
+      setChannelStatus(channel, "offline");
+      if (activeAudioChannel === channel) setActiveAudioChannel(null);
+      syncGridLayout();
     });
-  }
-
-  if (typeof player.addEventListener === "function" && Twitch.Player.PLAYBACK_BLOCKED) {
-    player.addEventListener(Twitch.Player.PLAYBACK_BLOCKED, () => {
-      window.setTimeout(() => {
-        if (players.get(channel) !== player) {
-          return;
-        }
-
-        queuePlayerAutoplay(channel, player);
+    on(SDK.Player.PLAYING, () => {
+      view.hasPlayed = true;
+      clearWatchdog();
+      view.notice?.remove();
+      view.notice = null;
+      initializePlayerQuality(view, player);
+      setChannelStatus(channel, "live");
+    });
+    on(SDK.Player.PAUSE, () => {
+      if (view.hasPlayed && view.tile.dataset.live !== "false" && !player.getEnded?.()) view.userPaused = true;
+      clearWatchdog();
+    });
+    on(SDK.Player.PLAY, () => { view.userPaused = false; });
+    on(SDK.Player.PLAYBACK_BLOCKED, () => {
+      clearWatchdog();
+      showTwitchNotice(view, "Your browser needs a click to start Twitch.", "Play", () => {
+        view.userPaused = false;
         requestPlayerPlayback(channel, player);
-      }, 120);
+      });
     });
+    on(SDK.Player.ERROR, () => showTwitchFailure(channel, "Twitch playback failed. Retry or open the channel directly."));
+  } catch (error) {
+    if (streamViews.get(channel) === view && generation === view.mountGeneration) showTwitchFailure(channel, error.message);
   }
+}
 
-  queuePlayerAutoplay(channel, player);
+function initializePlayerQuality(view, player) {
+  if (!view.qualityInitialized) view.qualityInitialized = applyPlayerQualityPreference(player);
+}
+
+function getTwitchViewport(width, height) {
+  if (width <= 0 || height <= 0) return null;
+  const scale = Math.min(1, width / TWITCH_VIEWPORT_WIDTH, height / TWITCH_VIEWPORT_HEIGHT);
+  const viewportWidth = Math.ceil(width / scale);
+  const viewportHeight = Math.ceil(height / scale);
+  return { width: viewportWidth, height: viewportHeight, scale: Math.min(width / viewportWidth, height / viewportHeight) };
+}
+
+function syncTwitchPlayerSize(view) {
+  if (!view.playerMount || view.tile.hidden) return;
+  const rect = view.shell.getBoundingClientRect();
+  const viewport = getTwitchViewport(rect.width, rect.height);
+  if (!viewport) return;
+  // Keep the actual iframe viewport large enough for Twitch to initialize,
+  // then scale the entire player to the tile. Do not enlarge or crop the tile.
+  // Use layout zoom: transform:scale() fails Twitch's visibility check.
+  view.playerMount.style.width = `${viewport.width}px`;
+  view.playerMount.style.height = `${viewport.height}px`;
+  view.playerMount.style.zoom = String(viewport.scale);
+}
+
+function showTwitchNotice(view, text, action, callback) {
+  view.notice?.remove();
+  const notice = document.createElement("div");
+  notice.className = "player-notice";
+  const message = document.createElement("span");
+  message.textContent = text;
+  message.setAttribute("role", "status");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "stream-audio-button";
+  button.textContent = action;
+  button.addEventListener("click", callback);
+  const link = document.createElement("a");
+  link.href = `https://www.twitch.tv/${view.stream.channel}`;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Open on Twitch";
+  notice.append(message, button, link);
+  view.shell.append(notice);
+  view.notice = notice;
+}
+
+function showTwitchFailure(channel, message) {
+  const view = streamViews.get(channel);
+  if (!view) return;
+  teardownPlayer(channel);
+  view.playbackError = true;
+  lastPollState = "error";
+  updatePollIndicator();
+  view.audioButton.disabled = true;
+  view.tile.hidden = false;
+  view.tile.dataset.live = "pending";
+  showTwitchNotice(view, message, "Retry playback", () => {
+    view.playbackError = false;
+    view.userPaused = false;
+    renderLiveStream(channel);
+    syncGridLayout();
+  });
+  setChannelStatus(channel, "pending");
+  syncGridLayout();
 }
 
 function renderOfflineStream(channel) {
@@ -756,7 +962,7 @@ async function renderPlutoStream(view) {
       // Import from app.js so even a cached older index.html can load the new
       // player. Do not load any Pluto dependencies on Twitch-only pages.
       if (!plutoModulePromise) {
-        plutoModulePromise = import(`./pluto.js?v=${Date.now()}`).catch((error) => {
+        plutoModulePromise = import(`./pluto.js?v=${APP_VERSION}`).catch((error) => {
           plutoModulePromise = null;
           throw error;
         });
@@ -764,7 +970,19 @@ async function renderPlutoStream(view) {
       await plutoModulePromise;
     }
     if (generation !== view.plutoGeneration) return;
-    view.disposePluto = window.StreamplexPluto.mount(view.shell, view.stream.streamId);
+    view.disposePluto = window.StreamplexPluto.mount(view.shell, view.stream.streamId, {
+      onReady: () => { view.audioButton.disabled = false; syncAudioButtons(); },
+      onAudioChange: ({ muted, volume }) => {
+        audioVolumes.set(view.stream.id, volume);
+        if (!muted && volume > 0 && activeAudioChannel !== view.stream.id) setActiveAudioChannel(view.stream.id, false);
+        else if ((muted || volume === 0) && activeAudioChannel === view.stream.id) setActiveAudioChannel(null);
+      },
+    });
+    const video = view.shell.querySelector("video");
+    if (video) {
+      video.volume = audioVolumes.get(view.stream.id) ?? DEFAULT_ACTIVE_VOLUME;
+      video.muted = activeAudioChannel !== view.stream.id;
+    }
   } catch (error) {
     if (generation === view.plutoGeneration) {
       renderShellPlaceholder(view, view.stream.label, "Video player could not load. Reload, or use Open to watch on Pluto TV.", "offline");
@@ -795,18 +1013,25 @@ function renderShellPlaceholder(view, channel, message, state) {
 }
 
 function teardownPlayer(channel) {
-  clearPlayerAutoplay(channel);
-
-  if (!players.has(channel)) {
-    return;
-  }
-
+  const view = streamViews.get(channel);
   const player = players.get(channel);
-  if (player && typeof player.pause === "function") {
-    player.pause();
-  }
-
+  // Invalidate callbacks before destroy/pause can synchronously emit events.
   players.delete(channel);
+  if (view) {
+    view.mountGeneration = (view.mountGeneration || 0) + 1;
+    view.ready = false;
+    window.clearTimeout(view.startupTimer);
+    view.playerResizeObserver?.disconnect();
+    view.playerResizeObserver = null;
+    view.playerEvents?.forEach(({ event, handler }) => player?.removeEventListener?.(event, handler));
+    view.playerEvents = [];
+    view.sdkListeners?.forEach(({ listener, options }) => window.removeEventListener("message", listener, options));
+    view.sdkListeners = [];
+  }
+  try { player?.destroy?.(); } catch { /* Complete our cleanup even if the SDK fails. */ }
+  view?.shell.querySelector(".player-mount")?.remove();
+  if (view) view.playerMount = null;
+  if (!players.size) { window.clearInterval(audioMonitor); audioMonitor = null; }
 }
 
 function setChannelStatus(channel, state) {
@@ -821,16 +1046,16 @@ function setChannelStatus(channel, state) {
     state === "offline" ? "Offline" : state === "pending" ? "Checking live status" : "";
 }
 
-function setActiveAudioChannel(channel) {
-  activeAudioChannel = channel;
-  activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
+function setActiveAudioChannel(channel, toggle = true) {
+  captureActiveAudioVolume();
+  activeAudioChannel = toggle && activeAudioChannel === channel ? null : channel;
+  activeAudioVolume = audioVolumes.get(activeAudioChannel) ?? DEFAULT_ACTIVE_VOLUME;
   syncPlayerAudio({ forceActiveVolume: true });
   syncAudioButtons();
 }
 
 function clearActiveAudioChannel() {
-  activeAudioChannel = null;
-  activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
+  setActiveAudioChannel(null);
 }
 
 function syncPlayerAudio(options = {}) {
@@ -839,7 +1064,15 @@ function syncPlayerAudio(options = {}) {
   }
 
   players.forEach((player, channel) => {
-    requestPlayerPlayback(channel, player, options);
+    if (streamViews.get(channel)?.ready) applyPlayerAudioState(channel, player);
+  });
+  streamViews.forEach((view, id) => {
+    if (!isPlutoView(view)) return;
+    const video = view.shell.querySelector("video");
+    if (video) {
+      video.muted = id !== activeAudioChannel;
+      if (id === activeAudioChannel) video.volume = activeAudioVolume;
+    }
   });
 }
 
@@ -848,7 +1081,14 @@ function captureActiveAudioVolume() {
     return;
   }
 
-  capturePlayerAudioVolume(players.get(activeAudioChannel));
+  const view = streamViews.get(activeAudioChannel);
+  if (isPlutoView(view)) {
+    const video = view.shell.querySelector("video");
+    if (video) activeAudioVolume = video.volume;
+  } else {
+    capturePlayerAudioVolume(players.get(activeAudioChannel));
+  }
+  audioVolumes.set(activeAudioChannel, activeAudioVolume);
 }
 
 function capturePlayerAudioVolume(player) {
@@ -878,18 +1118,39 @@ function applyPlayerAudioState(channel, player) {
   }
 
   if (typeof player.setVolume === "function") {
-    player.setVolume(isActive ? activeAudioVolume : INACTIVE_VOLUME);
+    // Muting must not erase the user's selected volume.
+    if (isActive) player.setVolume(activeAudioVolume);
   }
 }
 
 function requestPlayerPlayback(channel, player, options = {}) {
-  if (!options.forceActiveVolume && channel === activeAudioChannel) {
-    capturePlayerAudioVolume(player);
-  }
-
-  applyPlayerQualityPreference(player);
-  applyPlayerAudioState(channel, player);
+  const view = streamViews.get(channel);
+  if (!view?.ready || view.userPaused || view.tile.hidden) return;
   safelyPlayPlayer(player);
+}
+
+function startAudioMonitor() {
+  if (audioMonitor) return;
+  // Twitch has no documented volume-change event. Observe transitions, not
+  // stale command acknowledgements, to include its native mute controls.
+  audioMonitor = window.setInterval(() => {
+    players.forEach((player, id) => {
+      const view = streamViews.get(id);
+      if (!view?.ready) return;
+      try {
+        const snapshot = { muted: player.getMuted(), volume: player.getVolume() };
+        const previous = view.audioSnapshot;
+        view.audioSnapshot = snapshot;
+        if (!previous) return;
+        if (!snapshot.muted && snapshot.volume > 0 && (previous.muted || previous.volume === 0)) {
+          audioVolumes.set(id, snapshot.volume);
+          if (activeAudioChannel !== id) setActiveAudioChannel(id, false);
+        } else if (activeAudioChannel === id && (snapshot.muted || snapshot.volume === 0)) {
+          setActiveAudioChannel(null);
+        } else if (activeAudioChannel === id) audioVolumes.set(id, snapshot.volume);
+      } catch { /* Player is transitioning; try the next tick. */ }
+    });
+  }, 1000);
 }
 
 function applyPlayerQualityPreference(player) {
@@ -905,20 +1166,21 @@ function applyPlayerQualityPreference(player) {
   try {
     const currentQuality = player.getQuality();
     if (typeof currentQuality === "string" && PREFERRED_QUALITY_PATTERN.test(currentQuality)) {
-      return;
+      return true;
     }
 
     const qualities = player.getQualities();
     const availableQualities = Array.isArray(qualities)
-      ? qualities.filter((quality) => typeof quality === "string" && quality.length > 0)
+      ? qualities.map((quality) => typeof quality === "string" ? quality : quality?.group).filter((quality) => typeof quality === "string" && quality.length > 0)
       : [];
     const preferredQuality = pickPreferredQuality(availableQualities);
 
     if (!preferredQuality || preferredQuality === currentQuality) {
-      return;
+      return Boolean(preferredQuality);
     }
 
     player.setQuality(preferredQuality);
+    return true;
   } catch (error) {
     // Ignore quality selection timing errors; the next player event or retry will try again.
   }
@@ -927,7 +1189,9 @@ function applyPlayerQualityPreference(player) {
 function pickPreferredQuality(qualities) {
   const exactMatches = qualities.filter((quality) => PREFERRED_QUALITY_PATTERN.test(quality));
   if (!exactMatches.length) {
-    return null;
+    const resolutions = qualities.filter((quality) => /^\d+p\d*$/.test(quality));
+    const smaller = resolutions.filter((quality) => parseInt(quality, 10) < 480);
+    return (smaller.length ? smaller.sort((a, b) => parseInt(b, 10) - parseInt(a, 10)) : resolutions.sort((a, b) => parseInt(a, 10) - parseInt(b, 10)))[0] || null;
   }
 
   exactMatches.sort((left, right) => extractQualityFps(right) - extractQualityFps(left));
@@ -941,7 +1205,7 @@ function extractQualityFps(quality) {
 
 function syncAudioButtons() {
   streamViews.forEach((view, channel) => {
-    if (!isTwitchView(view) || !view.audioButton) {
+    if (!view.audioButton) {
       return;
     }
 
@@ -949,6 +1213,7 @@ function syncAudioButtons() {
     view.audioButton.classList.toggle("active", isActive);
     view.audioButton.setAttribute("aria-pressed", isActive ? "true" : "false");
     view.audioButton.textContent = isActive ? "On" : "Audio";
+    view.audioButton.setAttribute("aria-label", isActive ? `Mute ${view.stream.label}` : `Listen to ${view.stream.label}`);
   });
 }
 
@@ -1048,7 +1313,6 @@ function syncGridLayout() {
   const visibleCount = syncVisibleStreamState();
 
   if (!visibleCount) {
-    clearAutoplaySync();
     streamGrid.classList.remove("stream-grid-dynamic");
     streamGrid.style.removeProperty("--dynamic-tile-width");
     streamGrid.style.removeProperty("--dynamic-tile-height");
@@ -1056,36 +1320,35 @@ function syncGridLayout() {
     return;
   }
 
-  const gap = parseFloat(window.getComputedStyle(streamGrid).columnGap || "0") || 0;
+  const gap = parseFloat(window.getComputedStyle(streamGrid).getPropertyValue("--stream-gap")) || 0;
   const shellStyles = appShell ? window.getComputedStyle(appShell) : null;
   const shellBottomPadding = shellStyles ? parseFloat(shellStyles.paddingBottom || "0") || 0 : 0;
   const gridRect = streamGrid.getBoundingClientRect();
-  const gridWidth = Math.max(streamGrid.clientWidth || gridRect.width, 0);
+  const gridWidth = Math.max(gridRect.width, 0);
   const availableHeight = Math.max(window.innerHeight - gridRect.top - shellBottomPadding - 6, 0);
-  const { columns, rows } = chooseBestGrid(visibleCount, gridWidth, availableHeight, gap);
+  const { columns, rows, gap: fittedGap } = chooseBestGrid(visibleCount, gridWidth, availableHeight, gap);
   const tileWidth = Math.max(
-    Math.floor((gridWidth - gap * Math.max(columns - 1, 0)) / columns),
+    Math.floor((gridWidth - fittedGap * Math.max(columns - 1, 0)) / columns),
     0
   );
   const tileHeight = Math.max(
-    Math.floor((availableHeight - gap * Math.max(rows - 1, 0)) / rows),
+    Math.floor((availableHeight - fittedGap * Math.max(rows - 1, 0)) / rows),
     0
   );
 
   streamGrid.classList.add("stream-grid-dynamic");
+  // At very small sizes, reserve the tile for video rather than its toolbar.
+  streamGrid.classList.toggle("stream-grid-compact", tileHeight < 64);
+  streamGrid.style.setProperty("--dynamic-grid-gap", `${fittedGap}px`);
   streamGrid.style.setProperty("--dynamic-tile-width", `${tileWidth}px`);
   streamGrid.style.setProperty("--dynamic-tile-height", `${tileHeight}px`);
   streamGrid.style.setProperty(
     "--grid-height",
-    `${rows * tileHeight + gap * Math.max(rows - 1, 0)}px`
+    `${rows * tileHeight + fittedGap * Math.max(rows - 1, 0)}px`
   );
   window.requestAnimationFrame(() => {
+    streamViews.forEach((view) => { if (isTwitchView(view)) syncTwitchPlayerSize(view); });
     mountPendingPlayers();
-    if (players.size) {
-      scheduleAutoplaySync();
-    } else {
-      clearAutoplaySync();
-    }
   });
 }
 
@@ -1126,13 +1389,16 @@ function chooseBestGrid(count, width, height, gap) {
   let best = {
     columns: 1,
     rows: count,
+    gap,
     score: Number.NEGATIVE_INFINITY,
   };
 
   for (let columns = 1; columns <= count; columns += 1) {
     const rows = Math.ceil(count / columns);
-    const tileWidth = Math.max((width - gap * (columns - 1)) / columns, 0);
-    const tileHeight = Math.max((height - gap * Math.max(rows - 1, 0)) / rows, 0);
+    // Gutters must shrink too when many streams share a small viewport.
+    const fittedGap = Math.max(0, Math.min(gap, width / (2 * columns), height / (2 * rows)));
+    const tileWidth = Math.max((width - fittedGap * (columns - 1)) / columns, 0);
+    const tileHeight = Math.max((height - fittedGap * Math.max(rows - 1, 0)) / rows, 0);
     const tileArea = tileWidth * tileHeight;
     const aspect = tileHeight > 0 ? tileWidth / tileHeight : 0;
     const aspectPenalty = Math.abs(Math.log((aspect || 1) / (16 / 9)));
@@ -1142,23 +1408,13 @@ function chooseBestGrid(count, width, height, gap) {
       best = {
         columns,
         rows,
+        gap: fittedGap,
         score,
       };
     }
   }
 
   return best;
-}
-
-function autoplayVisiblePlayers() {
-  players.forEach((player, channel) => {
-    const view = streamViews.get(channel);
-    if (!isTwitchView(view) || view.tile.hidden || !hasPlayableArea(view.shell)) {
-      return;
-    }
-
-    requestPlayerPlayback(channel, player);
-  });
 }
 
 function safelyPlayPlayer(player) {
@@ -1171,90 +1427,6 @@ function safelyPlayPlayer(player) {
   } catch (error) {
     // Ignore autoplay timing failures; the next poll or interaction will retry.
   }
-}
-
-function scheduleAutoplaySync() {
-  if (autoplaySyncFrame) {
-    window.cancelAnimationFrame(autoplaySyncFrame);
-  }
-
-  autoplaySyncTimeouts.forEach((timer) => window.clearTimeout(timer));
-  autoplaySyncTimeouts = [];
-
-  autoplaySyncFrame = window.requestAnimationFrame(() => {
-    autoplayVisiblePlayers();
-    autoplaySyncFrame = null;
-  });
-
-  [180, 650].forEach((delay) => {
-    const timer = window.setTimeout(() => {
-      autoplayVisiblePlayers();
-      autoplaySyncTimeouts = autoplaySyncTimeouts.filter((entry) => entry !== timer);
-    }, delay);
-
-    autoplaySyncTimeouts.push(timer);
-  });
-}
-
-function queuePlayerAutoplay(channel, player) {
-  clearPlayerAutoplay(channel);
-
-  const kick = () => {
-    const view = streamViews.get(channel);
-    if (
-      players.get(channel) !== player ||
-      !isTwitchView(view) ||
-      view.tile.hidden ||
-      !hasPlayableArea(view.shell)
-    ) {
-      return;
-    }
-
-    requestPlayerPlayback(channel, player);
-  };
-
-  const delayTimers = [0, 160, 420, 900, 1800].map((delay) => window.setTimeout(kick, delay));
-  const interval = window.setInterval(kick, 2500);
-  const stopTimer = window.setTimeout(() => {
-    clearPlayerAutoplay(channel);
-  }, 45000);
-
-  autoplayMonitors.set(channel, {
-    delayTimers,
-    interval,
-    stopTimer,
-  });
-}
-
-function clearPlayerAutoplay(channel) {
-  const monitor = autoplayMonitors.get(channel);
-  if (!monitor) {
-    return;
-  }
-
-  monitor.delayTimers.forEach((timer) => window.clearTimeout(timer));
-  window.clearInterval(monitor.interval);
-  window.clearTimeout(monitor.stopTimer);
-  autoplayMonitors.delete(channel);
-}
-
-function clearAutoplaySync() {
-  if (autoplaySyncFrame) {
-    window.cancelAnimationFrame(autoplaySyncFrame);
-    autoplaySyncFrame = null;
-  }
-
-  autoplaySyncTimeouts.forEach((timer) => window.clearTimeout(timer));
-  autoplaySyncTimeouts = [];
-}
-
-function hasPlayableArea(element) {
-  if (!element) {
-    return false;
-  }
-
-  const rect = element.getBoundingClientRect();
-  return rect.width > 24 && rect.height > 24;
 }
 
 function isChannelVisible(channel) {
@@ -1291,7 +1463,8 @@ function parseChannels(value) {
   if (/^https?:\/\//i.test(trimmedValue)) {
     try {
       const url = new URL(trimmedValue);
-      source = url.searchParams.get(STREAMS_QUERY_PARAM) || "";
+      source = url.searchParams.get(STREAMS_QUERY_PARAM) ||
+        (/^(?:www\.)?twitch\.tv$/i.test(url.hostname) && /^\/[a-z0-9_]+\/?$/i.test(url.pathname) ? url.pathname.split("/")[1] : "");
     } catch (error) {
       source = "";
     }

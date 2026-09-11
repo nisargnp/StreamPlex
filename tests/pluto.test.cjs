@@ -17,6 +17,7 @@ function loadApp(search = "") {
     window: {
       location: new URL(`https://streamplex.example/${search}`),
       addEventListener: () => {},
+      clearInterval: () => {},
     },
   });
   vm.runInContext(source, context);
@@ -130,7 +131,7 @@ test("never plays Pluto's fallback channel or trusts an unrelated playback host"
   assert.throws(() => pluto.parseSession(boot, boot.EPG[0].id), /unsupported/);
 });
 
-function playerHarness(fetchImpl = async () => ({ ok: true, json: async () => sessionFixture() })) {
+function playerHarness(fetchImpl = async () => ({ ok: true, json: async () => sessionFixture() }), overrides = {}) {
   class Element {
     constructor(tag) { this.tag = tag; this.listeners = {}; this.attributes = {}; this.hidden = false; this.paused = true; }
     setAttribute(name, value) { this.attributes[name] = value; }
@@ -150,7 +151,7 @@ function playerHarness(fetchImpl = async () => ({ ok: true, json: async () => se
   class Hls {
     static isSupported() { return true; }
     static Events = { ERROR: "error" };
-    constructor() { instances.push(this); }
+    constructor(config) { this.config = config; instances.push(this); }
     on(_event, handler) { this.onError = handler; }
     loadSource(url) { this.url = url; }
     attachMedia(video) { this.video = video; }
@@ -165,6 +166,7 @@ function playerHarness(fetchImpl = async () => ({ ok: true, json: async () => se
     setTimeout: (fn, ms) => { const id = ++timerSequence; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id),
     fetch: (...args) => { requests.push(args); return fetchImpl(...args); },
+    ...overrides,
   });
   const shell = new Element("div");
   const flush = async () => { for (let i = 0; i < 15; i++) await Promise.resolve(); };
@@ -190,7 +192,8 @@ test("prefers HLS.js over an unreliable native-support claim and cleans up", asy
   assert.equal(h.requests[0][1].credentials, "omit");
   video.emit("playing");
   assert.equal(notice.hidden, true);
-  assert.equal(h.timers.size, 0);
+  assert.equal(h.timers.size, 1, "session refresh remains scheduled after playing");
+  assert.equal(h.instances[0].config.backBufferLength, 30);
   dispose();
   assert.equal(h.instances[0].destroyed, true);
   assert.equal(h.requests[0][1].signal.aborted, true);
@@ -241,4 +244,39 @@ test("unmapped numeric ID shows an actionable error without fetching", async () 
   assert.match(h.shell.children[1].children[0].textContent, /not mapped/);
   assert.equal(h.shell.children[1].children[1].hidden, false);
   dispose();
+});
+
+test("refresh uses Pluto's interval and renews without losing manual pause", async () => {
+  const fixture = sessionFixture(); fixture.refreshInSec = 100;
+  const h = playerHarness(async () => ({ ok: true, json: async () => fixture }));
+  const dispose = h.api.mount(h.shell, "29262");
+  await h.flush();
+  const video = h.shell.children[0];
+  video.readyState = 4; video.currentSrc = "blob:test"; video.emit("playing");
+  video.pause(); video.emit("pause");
+  h.fireTimer(90000);
+  await h.flush();
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.instances[0].destroyed, true);
+  assert.equal(video.paused, true);
+  assert.equal(h.instances[1].config.backBufferLength, 30);
+  dispose();
+  assert.equal(h.timers.size, 0);
+});
+
+test("native Safari playback does not load or require the external HLS script", async () => {
+  const h = playerHarness(undefined, { navigator: { userAgent: "Version/18.0 Safari/605.1.15" }, Hls: undefined });
+  const dispose = h.api.mount(h.shell, "29262");
+  await h.flush();
+  assert.match(h.shell.children[0].src, /^https:\/\/example.prd.pluto.tv/);
+  assert.equal(h.instances.length, 0);
+  dispose();
+});
+
+test("refresh interval is bounded for missing and malformed service data", () => {
+  const pluto = loadPluto();
+  for (const value of [null, undefined, "not-a-number", -1, 0]) {
+    const fixture = sessionFixture(); fixture.refreshInSec = value;
+    assert.equal(pluto.parseSession(fixture, fixture.EPG[0].id).refreshMs, 14400000);
+  }
 });

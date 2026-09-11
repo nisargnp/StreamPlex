@@ -272,8 +272,9 @@ html[data-theme="light"] .theme-toggle-knob {
 }
 
 .stream-grid {
+  --stream-gap: 6.4px;
   display: grid;
-  gap: 0.4rem;
+  gap: var(--stream-gap);
   grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--tile-min-width)), 1fr));
 }
 
@@ -287,6 +288,7 @@ html[data-theme="light"] .theme-toggle-knob {
   justify-content: center;
   align-content: flex-start;
   height: var(--grid-height, auto);
+  gap: var(--dynamic-grid-gap, var(--stream-gap));
 }
 
 .stream-tile {
@@ -294,6 +296,7 @@ html[data-theme="light"] .theme-toggle-knob {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 0.9rem;
   background: var(--panel);
@@ -361,6 +364,7 @@ html[data-theme="light"] .theme-toggle-knob {
 }
 
 .player-shell {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   background: var(--player-bg);
@@ -389,7 +393,14 @@ html[data-theme="light"] .theme-toggle-knob {
   border: 0;
 }
 
-.pluto-notice {
+.player-mount {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.pluto-notice,
+.player-notice {
   position: absolute;
   inset: 0;
   display: flex;
@@ -403,6 +414,17 @@ html[data-theme="light"] .theme-toggle-knob {
   color: #fff;
   text-align: center;
 }
+
+.stream-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.player-notice a { color: #fff; }
+.player-notice .stream-audio-button,
+.pluto-notice .stream-audio-button { color: #fff; border-color: #777; }
+
+.stream-grid-compact .stream-name { display: none; }
 
 .pluto-notice[hidden],
 .pluto-notice button[hidden] {

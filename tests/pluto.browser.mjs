@@ -69,6 +69,7 @@ try {
   await evaluate(`window.testVideo=document.querySelector('.pluto-video')`);
   let last = await evaluate(`({time:testVideo.currentTime,frames:testVideo.getVideoPlaybackQuality().totalVideoFrames})`);
   const initialRequests = bootRequests;
+  assert.equal(await evaluate(`performance.getEntriesByType('resource').some(r=>r.name.includes('player.twitch.tv'))`), false, "Pluto-only pages must not download Twitch's SDK");
   for (const [width, height] of [[1280,720], [390,844], [1440,400], [1920,1080]]) {
     await resize(width, height);
     await pause(2500);
@@ -97,6 +98,23 @@ try {
   assert.ok(Math.abs(fractional.video.height - fractional.shell.height) < 0.1, JSON.stringify(fractional));
   assert.equal(bootRequests, initialRequests, "resizing must not create a new session");
   console.log("PASS independent fractional tile resize without restarting playback");
+
+  await evaluate(`navigateToChannels(['streamplex_nonexistent_test']); window.retainedVideo=document.querySelector('.pluto-video')`);
+  await pause(1500);
+  await evaluate(`navigateToChannels([])`);
+  assert.equal(await evaluate(`testVideo===document.querySelector('.pluto-video') && retainedVideo===testVideo`), true);
+  assert.equal(bootRequests, initialRequests, "editing Twitch selection must not restart Pluto");
+  console.log("PASS real Pluto video survives Twitch selection edits");
+
+  const soakSeconds = Math.max(0, Number(process.env.SOAK_SECONDS) || 0);
+  const soakEnd = Date.now() + soakSeconds * 1000;
+  while (Date.now() < soakEnd) {
+    await pause(Math.min(10000, soakEnd - Date.now()));
+    const sample = await evaluate(`(() => {const v=document.querySelector('.pluto-video');return {time:v.currentTime,paused:v.paused,back:v.buffered.length?v.currentTime-v.buffered.start(0):0,frames:v.getVideoPlaybackQuality().totalVideoFrames,heap:performance.memory?.usedJSHeapSize}})()`);
+    assert.equal(sample.paused, false);
+    assert.ok(sample.back < 90, "back buffer should remain bounded (including segment slack)");
+    console.log("SOAK", JSON.stringify(sample));
+  }
 
   await navigate("999999999");
   await waitFor(`document.querySelector('.pluto-notice')?.innerText.includes('not mapped')`, "explicit unknown-ID error");

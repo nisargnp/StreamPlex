@@ -1,0 +1,185 @@
+// Deterministic browser integration checks: real DOM/layout, fake provider SDKs.
+// Run with Node 22+, a local HTTP server, and disposable Chrome on CDP port 9222.
+import assert from "node:assert/strict";
+const endpoint = process.env.CDP_URL || "http://127.0.0.1:9222";
+const base = process.env.STREAMPLEX_URL || "http://127.0.0.1:8000/";
+const version = await (await fetch(`${endpoint}/json/version`)).json();
+const ws = new WebSocket(version.webSocketDebuggerUrl);
+await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+let sequence = 0;
+const pending = new Map();
+const exceptions = [];
+ws.onmessage = ({ data }) => {
+  const message = JSON.parse(data);
+  if (pending.has(message.id)) {
+    const p = pending.get(message.id); pending.delete(message.id); clearTimeout(p.timer);
+    message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result);
+  } else if (message.method === "Runtime.exceptionThrown") exceptions.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
+};
+function send(method, params = {}, sessionId) {
+  return new Promise((resolve, reject) => {
+    const id = ++sequence;
+    const timer = setTimeout(() => { pending.delete(id); reject(Error(`${method} timed out`)); }, 30000);
+    pending.set(id, { resolve, reject, timer }); ws.send(JSON.stringify({ id, method, params, sessionId }));
+  });
+}
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function fixtures() {
+  window.fakeInstances = [];
+  window.fakePlutoDisposals = 0;
+  class Player {
+    constructor(id, options) {
+      this.options = options;
+      this.channel = options.channel; this.events = new Map(); this.muted = true; this.volume = 0.5;
+      this.quality = "auto"; this.paused = true; this.plays = 0; this.destroyed = false;
+      this.iframe = document.createElement("iframe"); this.iframe.src = "about:blank";
+      document.getElementById(id).append(this.iframe);
+      this.leaky = () => {}; this.forward = () => {};
+      window.addEventListener("message", this.leaky); window.addEventListener("message", this.forward);
+      window.fakeInstances.push(this);
+      setTimeout(() => { this.emit("ready"); this.emit("online"); }, 20);
+    }
+    addEventListener(event, fn) { if (!this.events.has(event)) this.events.set(event, new Set()); this.events.get(event).add(fn); }
+    removeEventListener(event, fn) { this.events.get(event)?.delete(fn); }
+    emit(event) { this.events.get(event)?.forEach((fn) => fn()); }
+    play() { this.plays++; this.paused = false; this.emit("play"); this.emit("playing"); }
+    pause() { this.paused = true; this.emit("pause"); }
+    isPaused() { return this.paused; }
+    getQualities() { return [{ group: "auto" }, { group: "720p60" }, { group: "480p30" }]; }
+    getQuality() { return this.quality; }
+    setQuality(value) { this.quality = value; }
+    setMuted(value) { this.muted = value; }
+    getMuted() { return this.muted; }
+    setVolume(value) { this.volume = value; }
+    getVolume() { return this.volume; }
+    destroy() { this.destroyed = true; this.events.clear(); window.removeEventListener("message", this.forward); this.iframe.remove(); }
+  }
+  for (const event of ["READY", "ONLINE", "OFFLINE", "PLAYING", "PLAY", "PAUSE", "ERROR", "PLAYBACK_BLOCKED"]) Player[event] = event.toLowerCase();
+  window.Twitch = window.fakeSDK = { Player };
+  window.StreamplexPluto = { mount(shell, id, callbacks) {
+    const video = document.createElement("video"); video.className = "pluto-video"; video.muted = true;
+    video.addEventListener("volumechange", () => callbacks.onAudioChange({ muted: video.muted, volume: video.volume }));
+    shell.replaceChildren(video); callbacks.onReady();
+    return () => { window.fakePlutoDisposals++; };
+  } };
+  const fetch = window.fetch.bind(window);
+  window.fetch = (url, options) => String(url).includes("static-cdn.jtvnw.net")
+    ? Promise.resolve({ ok: true, status: 200, url: String(url) }) : fetch(url, options);
+}
+let context;
+try {
+  context = await send("Target.createBrowserContext");
+  const { targetId } = await send("Target.createTarget", { url: "about:blank", browserContextId: context.browserContextId });
+  const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+  const run = async (expression, commandLine = false) => {
+    const result = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, includeCommandLineAPI: commandLine }, sessionId);
+    if (result.exceptionDetails) throw Error(result.exceptionDetails.exception?.description);
+    return result.result.value;
+  };
+  const wait = async (expression) => {
+    for (let i = 0; i < 100; i++) { if (await run(expression)) return; await pause(100); }
+    throw Error(`Condition timed out: ${expression}; ${await run("document.body.innerText")}`);
+  };
+  const resize = (width, height) => send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, sessionId);
+  const assertFits = async (count) => {
+    const layout = await run(`(() => {
+      const tiles = [...document.querySelectorAll('.stream-tile:not([hidden])')];
+      return {count:tiles.length, width:innerWidth, height:innerHeight,
+        pageWidth:document.documentElement.scrollWidth, pageHeight:document.documentElement.scrollHeight,
+        fits:tiles.every(t=>{const r=t.getBoundingClientRect();const s=t.querySelector('.player-shell').getBoundingClientRect();
+          const frame=t.querySelector('iframe');const f=frame?.getBoundingClientRect();
+          const playerFits=!frame || (frame.clientWidth>=400 && frame.clientHeight>=300 &&
+            f.left>=s.left-0.5 && f.top>=s.top-0.5 && Math.abs(f.right-s.right)<1 && Math.abs(f.bottom-s.bottom)<1);
+          return playerFits && r.left>=0 && r.top>=0 && r.right<=innerWidth+0.5 && r.bottom<=innerHeight+0.5 && s.width>0 && s.height>0;})};
+    })()`);
+    assert.equal(layout.count, count, JSON.stringify(layout));
+    assert.equal(layout.fits, true, JSON.stringify(layout));
+    assert.ok(layout.pageWidth <= layout.width, JSON.stringify(layout));
+    assert.ok(layout.pageHeight <= layout.height, JSON.stringify(layout));
+  };
+  const listeners = () => run("(getEventListeners(window).message || []).length", true);
+  await send("Page.enable", {}, sessionId); await send("Runtime.enable", {}, sessionId); await send("Network.enable", {}, sessionId);
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: `(${fixtures})()` }, sessionId);
+  await resize(1280, 720);
+  await send("Page.navigate", { url: new URL("?streams=one,two&pluto=29262", base).href }, sessionId);
+  await wait("typeof players!=='undefined' && players.size===2 && [...players.values()].every(p=>p.quality==='480p30')");
+  await run("window.originalOne=players.get('one');window.originalPluto=document.querySelector('.pluto-video')");
+  assert.equal(await run("[...players.values()].every(p=>p.options.autoplay===true && p.options.muted===true)"), true);
+  assert.equal(await listeners(), 4);
+  await run("originalOne.pause(); originalOne.quality='720p60'; originalOne.emit('playing')");
+  for (const [w, h] of [[390,844], [1280,720], [1920,1080]]) {
+    await resize(w, h); await pause(150);
+    assert.equal(await run("originalOne.paused && originalOne.quality==='720p60'"), true);
+    await assertFits(3);
+  }
+  console.log("PASS all tiles fit the viewport; resize preserves manual pause and quality");
+  await run("window.resizePlays=originalOne.plays;streamViews.get('one').tile.style.cssText='flex:none;width:233.5px;height:145.25px'");
+  await pause(150);
+  assert.equal(await run(`(() => {const v=streamViews.get('one'),s=v.shell.getBoundingClientRect(),f=v.playerMount.getBoundingClientRect();return Math.abs(s.width-f.width)<1 && Math.abs(s.height-f.height)<1 && originalOne.plays===resizePlays && originalOne.paused;})()`), true);
+  await run("streamViews.get('one').tile.style.cssText='';syncGridLayout()");
+  console.log("PASS independent fractional tile resize updates zoom without issuing play commands");
+  for (const [w, h] of [[320,568], [390,844], [844,390], [1280,720], [1920,1080]]) {
+    await resize(w, h);
+    for (const count of [1,2,4,6,9,16,36]) {
+      await run(`navigateToChannels(Array.from({length:${count - 1}},(_,i)=>'layout'+i))`);
+      await wait(`players.size===${count - 1} && [...streamViews.values()].filter(v=>!v.tile.hidden).length===${count}`);
+      await pause(100);
+      await assertFits(count);
+    }
+  }
+  // Restore the original fixture before the lifecycle/audio checks below.
+  await run("navigateToChannels(['one','two'])");
+  await wait("players.size===2 && [...players.values()].every(p=>p.quality==='480p30')");
+  await run("window.originalOne=players.get('one');originalOne.pause()");
+  assert.equal(await run("document.querySelector('.pluto-video')===originalPluto && fakePlutoDisposals===0"), true);
+  console.log("PASS 1–36 mixed-provider tiles at five viewport sizes: no page scrolling or clipped videos");
+  await run("setActiveAudioChannel('one');originalOne.volume=0.23;setActiveAudioChannel('two');setActiveAudioChannel('two');setActiveAudioChannel('one')");
+  assert.equal(await run("originalOne.volume===0.23 && originalOne.paused && !originalOne.muted && players.get('two').muted"), true);
+  await run("setActiveAudioChannel('pluto-29262')"); await pause(100);
+  assert.equal(await run("originalOne.muted && !originalPluto.muted"), true);
+  await run("setActiveAudioChannel('two')"); await pause(100);
+  assert.equal(await run("originalPluto.muted && !players.get('two').muted"), true);
+  console.log("PASS exclusive provider audio, toggle-off, volume preservation, no forced playback");
+  for (let i = 0; i < 5; i++) {
+    await run("navigateToChannels(['one','two','three'])"); await wait("players.has('three') && streamViews.get('three').ready");
+    await run("navigateToChannels(['one','two'])");
+    assert.equal(await listeners(), 4);
+    assert.equal(await run("players.get('one')===originalOne && document.querySelector('.pluto-video')===originalPluto && fakePlutoDisposals===0"), true);
+  }
+  console.log("PASS add/remove preserves existing players; SDK listeners do not accumulate");
+  await run("history.back()"); await wait("currentChannels.includes('three') && players.has('three')");
+  await run("history.forward()"); await wait("!currentChannels.includes('three') && !players.has('three')");
+  assert.equal(await run("players.get('one')===originalOne"), true);
+  console.log("PASS browser Back/Forward reconciles URL without restarting retained players");
+  await run("originalOne.emit('offline')");
+  assert.equal(await run("streamViews.get('one').tile.hidden && players.get('one')===originalOne"), true);
+  await run("originalOne.emit('online')");
+  assert.equal(await run("!streamViews.get('one').tile.hidden && originalOne.paused"), true);
+  console.log("PASS offline/online events reuse the selected player and preserve pause");
+  await run("navigateToChannels([]); delete window.Twitch");
+  assert.equal(await listeners(), 0);
+  await send("Network.setBlockedURLs", { urls: ["*player.twitch.tv*"] }, sessionId);
+  await run("navigateToChannels(['failure'])");
+  await wait("document.querySelector('.player-notice')?.innerText.includes('Retry playback')");
+  await run("window.Twitch=window.fakeSDK;document.querySelector('.player-notice button').click()");
+  await wait("players.has('failure') && streamViews.get('failure').ready");
+  console.log("PASS SDK failure shows actionable retry and recovers without reloading the page");
+  for (const [w, h] of [[390,844], [844,390], [1280,720]]) {
+    await resize(w, h);
+    for (const count of [1,6,36]) {
+      await run(`navigateToChannels(Array.from({length:${count}},(_,i)=>'layout'+i),null)`);
+      await wait(`players.size===${count} && [...streamViews.values()].every(v=>!v.tile.hidden)`);
+      await pause(100);
+      await assertFits(count);
+    }
+  }
+  console.log("PASS Twitch-only layouts also fit without scrolling");
+  await run("players.get('layout0').pause();teardownPlayer('layout0');renderLiveStream('layout0');syncGridLayout()");
+  await wait("players.has('layout0') && streamViews.get('layout0').ready");
+  assert.equal(await run("players.get('layout0').options.autoplay===false && players.get('layout0').paused && players.get('layout0').plays===0 && streamViews.get('layout0').startupTimer===null"), true);
+  console.log("PASS intentional pause also survives provider remount without an autoplay timeout");
+  assert.deepEqual(exceptions, []);
+} finally {
+  if (context) await send("Target.disposeBrowserContext", context);
+  ws.close();
+}

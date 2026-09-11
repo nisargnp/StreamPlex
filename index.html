@@ -5,19 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Minimal Twitch multiview for GitHub Pages." />
     <meta name="theme-color" content="#000000" />
-    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
-    <meta http-equiv="Pragma" content="no-cache" />
-    <meta http-equiv="Expires" content="0" />
     <title>StreamPlex</title>
-    <script>
-      const streamplexCacheBuster = Date.now().toString();
-      document.write(`<link rel="icon" type="image/svg+xml" href="static/icon.svg?v=${streamplexCacheBuster}" />`);
-      document.write(`<link rel="stylesheet" href="static/styles.css?v=${streamplexCacheBuster}" />`);
-      document.write(`<script src="https://player.twitch.tv/js/embed/v1.js?v=${streamplexCacheBuster}"><\/script>`);
-    </script>
-    <script>
-      document.write(`<script defer src="static/app.js?v=${streamplexCacheBuster}"><\/script>`);
-    </script>
+    <link rel="icon" type="image/svg+xml" href="static/icon.svg" />
+    <link rel="stylesheet" href="static/styles.css?v=2026-09-11.3" />
+    <script defer src="static/app.js?v=2026-09-11.3"></script>
   </head>
   <body>
     <main class="app-shell">
@@ -39,6 +30,7 @@
             <div class="poll-indicator is-checking" id="poll-indicator" aria-live="polite" aria-atomic="true">
               <span class="poll-indicator-text" id="poll-indicator-text">Checking live status</span>
             </div>
+            <button class="stream-audio-button" id="refresh-streams" type="button" title="Check stream status now">Refresh</button>
             <button
               class="theme-toggle"
               id="theme-toggle"

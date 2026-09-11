@@ -16,7 +16,13 @@ Open Twitch streams directly with the `streams` query parameter:
 https://<your-pages-host>/?streams=channel_one,channel_two,channel_three
 ```
 
-You can also add channels from the `+` button by typing names separated with spaces or commas, or by pasting a full `?streams=...` URL.
+You can also add channels from the `+` button by typing names separated with spaces or commas, pasting a Twitch channel URL, or pasting a full `?streams=...&pluto=...` URL. A Pluto channel URL in the prompt adds/replaces the Pluto tile. Each selected provider has a removable pill.
+
+Adding/removing channels and browser Back/Forward update the URL in place. Unchanged players are retained; they do not restart. Twitch dependencies load on demand with an explicit retry if loading fails. Assets use a release version rather than a new timestamp on every visit. Bump the versions in `index.html` and `APP_VERSION` in `static/app.js` when deploying asset changes.
+
+Twitch starts muted with autoplay enabled and a 480p preference (accepting both old and current SDK quality formats); if unavailable it selects a lower resolution, or the smallest higher resolution. After initialization, manual quality choices and pauses are preserved. Resizing never sends playback or audio commands. All visible stream tiles fit together in the current viewport without page scrolling, including mixed Twitch/Pluto layouts. Tiles and gutters shrink as needed; tile toolbars are hidden below 64px tile height to leave room for video.
+
+Small Twitch tiles retain an internal iframe viewport of at least 400 × 300 and use CSS `zoom` to fit the whole player into the available video area, including its controls. A `ResizeObserver` keeps this synchronized with independent tile resizing, without recreating the iframe. Ordinary `transform: scale()` did not pass Twitch's visibility check in testing; repeatedly calling `play()` on an undersized player did not fix startup either. This behavior is verified in desktop Chrome; mobile/browser policies can still require a click, and small controls can be difficult to use. The Play fallback remains available when the browser reports blocked playback.
 
 Add a Pluto TV live channel as the final tile with the `pluto` query parameter:
 
@@ -34,13 +40,15 @@ Raw stream ids are the canonical URL format. Encoded Pluto live URLs from `pluto
 
 For playback, the new numeric ID `29262` is mapped to Naruto's legacy ID `5da0c85bd2c9c10009370984`. Other channels can use their legacy 24-character hexadecimal IDs. Pluto's numeric-ID resolver does not allow cross-origin browser requests; additional verified numeric aliases can be added to `CHANNEL_ALIASES` in `static/pluto.js`. An unmapped numeric ID shows an explicit error, never Pluto's default channel. The tile's `Open` link still works for any valid numeric ID.
 
-If `pluto` is omitted or the stream id is invalid, the Pluto tile is hidden. Playback starts muted to satisfy browser autoplay rules; use the video's native controls to unmute, pause, or go fullscreen. Pluto audio is independent of the Twitch audio buttons. If autoplay needs a user gesture, press the video's play button.
+If `pluto` is omitted or the stream id is invalid, the Pluto tile is hidden. Both providers start muted. Each tile's Audio button selects that stream and mutes the others; clicking On mutes it again. Volume is remembered per selected stream, and audio selection never resumes an intentionally paused player. Native Pluto volume changes are observed immediately; Twitch's native mute/volume controls are observed once per second because its SDK has no documented volume-change event. Native controls also provide pause/fullscreen. If autoplay needs a user gesture, press Play.
 
-The September 2026 Pluto website stalls on “Optimizing your video playback experience” inside a cross-site iframe. Testing isolated the failure to first-party session-cookie availability. Streamplex therefore uses a fresh anonymous session from Pluto's web playback service and plays its ad-supported HLS stream directly, without embedding the webpage, changing cookie settings, using a proxy, or persisting session tokens. The pinned, integrity-checked hls.js 1.7.2 player loads from jsDelivr only when a Pluto tile is present, with native HLS as a fallback for browsers without compatible Media Source support.
+The September 2026 Pluto website stalls on “Optimizing your video playback experience” inside a cross-site iframe. Testing isolated the failure to first-party session-cookie availability. Streamplex therefore uses a fresh anonymous session from Pluto's web playback service and plays its ad-supported HLS stream directly, without embedding the webpage, changing cookie settings, using a proxy, or persisting session tokens. Safari uses native HLS without depending on jsDelivr; other compatible browsers use the pinned, integrity-checked hls.js 1.7.2 player. Chrome's unreliable native-HLS capability claim is not used as the preferred path.
 
 The video uses `object-fit: contain`, so the entire picture is centered at the maximum size that fits each tile. Black bars fill any unused space. Window resizing, tile resizing, and changes to the video's own aspect ratio need no crop calibration or playback restart.
 
 Startup and stalled playback have timeouts, bounded reconnection attempts, and a manual retry button. These Pluto web-client endpoints are not a guaranteed public embed API: service changes, regional availability, or blockers can still prevent playback. The `Open` link provides a direct-site fallback. No geo-restrictions, DRM, or ad segments are bypassed.
+
+HLS.js retains only 30 seconds of played video (plus segment boundaries). Pluto sessions renew at 90% of the service's refresh interval, with a four-hour fallback if the interval is missing. Renewal briefly reconnects at the live edge and preserves a manual pause and audio settings. Returning from sleep/hidden-tab throttling checks for overdue renewal. All timers and SDK listeners are cleaned up when a player is removed.
 
 ## Local Preview
 
@@ -56,17 +64,34 @@ Then open:
 http://127.0.0.1:8000/?streams=channel_one,channel_two,channel_three
 ```
 
-Run the offline Pluto URL/session regression checks with Node.js:
+Run the offline Twitch/Pluto regression checks with Node.js:
 
 ```bash
-node --test tests/pluto.test.cjs
+node --test tests/*.test.cjs
 ```
 
 To verify actual playback, start a **disposable** Chrome profile with remote debugging on port 9222 and keep the local server above running. Then use Node 22 or newer:
 
 ```bash
 node tests/pluto.browser.mjs
+node tests/app.browser.mjs
 ```
+
+For real Twitch autoplay verification, choose channels that are currently live:
+
+```bash
+TWITCH_CHANNELS=shroud,lirik,xqc node tests/twitch.browser.mjs
+```
+
+This checks a fresh small-viewport load without clicking Play, advancing decoded video frames inside the real Twitch iframes, resizing without scrolling/recreation, and manual pause preservation. Offline channels or upstream restrictions will fail this opt-in check.
+
+`app.browser.mjs` uses deterministic fake SDKs with the real DOM to check mixed-provider audio, viewport containment without scrolling across stream counts and window sizes, pause/quality preservation, history, add/remove identity, SDK-load failure, and repeated listener cleanup. `pluto.browser.mjs` uses real Pluto playback. For an extended live buffer/heap observation run:
+
+```bash
+SOAK_SECONDS=3600 node tests/pluto.browser.mjs
+```
+
+Session renewal and Safari-native selection are covered with simulated responses in the offline tests. Actual Safari/iOS behavior and multi-hour playback still need device-specific verification; Chrome emulation is not a substitute for those browsers.
 
 This opt-in test uses a fresh isolated browser context, checks advancing decoded video frames through desktop/portrait/fractional tile resizes, checks unmapped IDs, and blocks/unblocks the playback service to verify retry. It requires network access and Pluto availability in your region. `CDP_URL` and `STREAMPLEX_URL` override the defaults (`http://127.0.0.1:9222` and `http://127.0.0.1:8000/`). It does not modify browser cookie or security settings.
 
@@ -88,10 +113,11 @@ https://static-cdn.jtvnw.net/previews-ttv/live_user_<channel>-440x248.jpg
 
 Behavior:
 
-- First try a browser `fetch()` probe and use real `403` / `404` responses when the browser exposes them
-- Fall back to image loading if fetch status is unavailable
-- Treat known placeholder or forbidden preview URLs as offline
-- Keep the last known state if the probe times out or the result stays ambiguous
+- Initial unmounted channels use a browser `fetch()` probe; a readable 404 or recognized placeholder can indicate offline.
+- A 403, network failure, or unavailable cross-origin response means **unknown**, never offline. A successfully loaded image alone is not evidence of a live stream.
+- Unknown channels can mount the official Twitch player to determine status. Once mounted, ONLINE/OFFLINE events take precedence over thumbnail guesses; thumbnail failures cannot hide that player.
+- Selected offline SDK players are retained to receive ONLINE promptly, and are destroyed when removed. No repeated SDK construction is needed for offline/online transitions.
+- Results are applied individually, so a slow thumbnail does not delay the others. URL changes invalidate and abort stale checks. Incomplete checks show a retry state; Refresh runs a new check immediately.
 
 Because this runs entirely in the browser, it is less authoritative than the earlier server-side probe, but it is compatible with GitHub Pages.
 

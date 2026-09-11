@@ -46,7 +46,8 @@
     url.searchParams.set("jwt", boot.sessionToken);
     // Carry the anonymous session into child playlists, otherwise they 401.
     url.searchParams.set("masterJWTPassthrough", "true");
-    return { url: url.href, name: channel.name };
+    const refresh = Number(boot.refreshInSec);
+    return { url: url.href, name: channel.name, refreshMs: Number.isFinite(refresh) && refresh > 0 ? Math.max(1000, Math.min(refresh * 0.9 * 1000, 2147483647)) : 4 * 60 * 60 * 1000 };
   }
 
   function loadHls() {
@@ -75,7 +76,7 @@
     return hlsScriptPromise;
   }
 
-  function mount(shell, streamId) {
+  function mount(shell, streamId, callbacks = {}) {
     const video = document.createElement("video");
     video.className = "pluto-video";
     video.controls = true;
@@ -101,6 +102,19 @@
     let timer;
     let retries = 0;
     let playingSince = 0;
+    let refreshTimer;
+    let refreshAt = 0;
+    let userPaused = false;
+    let stopping = false;
+    let hasStarted = false;
+    let forceMse = false;
+
+    function preferNativeHls() {
+      // Safari's native HLS is independent of jsDelivr. Chrome's optimistic
+      // native support failed with these streams, so continue to prefer MSE there.
+      return !forceMse && video.canPlayType("application/vnd.apple.mpegurl") &&
+        /Safari\//.test(navigator.userAgent || "") && !/Chrome|Chromium|CriOS|Edg|OPR/.test(navigator.userAgent || "");
+    }
 
     function show(text, canRetry = false) {
       message.textContent = text;
@@ -110,12 +124,15 @@
 
     function stop() {
       clearTimeout(timer);
+      clearTimeout(refreshTimer);
       request?.abort();
+      stopping = true;
       hls?.destroy();
       hls = null;
       video.pause();
       video.removeAttribute("src");
       video.load();
+      stopping = false;
     }
 
     function fail(text, recover = true) {
@@ -135,6 +152,7 @@
       if (disposed) return;
       const current = ++attempt;
       stop();
+      refreshAt = 0;
       playingSince = 0;
       show("Connecting to Pluto TV…");
       request = new AbortController();
@@ -150,10 +168,11 @@
         video.setAttribute("aria-label", `${session.name || "Pluto TV"} live video`);
         // Prefer MSE: some Chrome versions report native HLS support but fail
         // on Pluto's playlists. A canPlayType result alone is not sufficient.
-        const Hls = await loadHls();
+        const native = preferNativeHls();
+        const Hls = native ? null : await loadHls();
         if (disposed || current !== attempt) return;
-        if (Hls.isSupported()) {
-          hls = new Hls({ capLevelToPlayerSize: true, maxBufferLength: 30 });
+        if (Hls?.isSupported()) {
+          hls = new Hls({ capLevelToPlayerSize: true, maxBufferLength: 30, backBufferLength: 30 });
           hls.on(Hls.Events.ERROR, (_event, data) => {
             if (!disposed && current === attempt && data.fatal) {
               fail("Pluto playback was interrupted. Retry, or use Open to watch on Pluto TV.");
@@ -165,6 +184,15 @@
           video.src = session.url;
         } else {
           throw new Error("This browser cannot play Pluto's HLS video. Use Open to watch on Pluto TV.");
+        }
+        refreshAt = Date.now() + session.refreshMs;
+        refreshTimer = setTimeout(() => { if (!disposed) start(); }, session.refreshMs);
+        hasStarted = true;
+        if (userPaused) {
+          video.autoplay = false;
+          clearTimeout(timer);
+          notice.hidden = true;
+          return;
         }
         const play = video.play();
         play?.catch((error) => {
@@ -184,9 +212,22 @@
     }
 
     video.addEventListener("playing", () => {
+      if (disposed) return;
       clearTimeout(timer);
       notice.hidden = true;
       playingSince = Date.now();
+      callbacks.onReady?.();
+    });
+    video.addEventListener("pause", () => {
+      if (!stopping && hasStarted && video.currentSrc && video.readyState >= 2) {
+        userPaused = true;
+        video.autoplay = false;
+        clearTimeout(timer);
+      }
+    });
+    video.addEventListener("play", () => { if (!stopping) userPaused = false; });
+    video.addEventListener("volumechange", () => {
+      if (!disposed) callbacks.onAudioChange?.({ muted: video.muted, volume: video.volume });
     });
     video.addEventListener("timeupdate", () => {
       if (playingSince && Date.now() - playingSince > 30000) retries = 0;
@@ -199,11 +240,23 @@
       }, STARTUP_TIMEOUT_MS);
     });
     video.addEventListener("error", () => {
-      if (!disposed && video.hasAttribute("src")) fail("Pluto video could not be played. Retry, or use Open to watch on Pluto TV.");
+      if (!disposed && !stopping && video.hasAttribute("src")) {
+        forceMse = true;
+        fail("Pluto video could not be played. Retry, or use Open to watch on Pluto TV.");
+      }
     });
-    retry.addEventListener("click", () => { retries = 0; start(); });
+    const onVisible = () => {
+      if (!disposed && document.visibilityState === "visible" && refreshAt && Date.now() >= refreshAt) start();
+    };
+    document.addEventListener?.("visibilitychange", onVisible);
+    retry.addEventListener("click", () => { retries = 0; userPaused = false; start(); });
     start();
-    return () => { disposed = true; attempt += 1; stop(); };
+    return () => {
+      disposed = true;
+      attempt += 1;
+      document.removeEventListener?.("visibilitychange", onVisible);
+      stop();
+    };
   }
 
   globalThis.StreamplexPluto = { mount, resolveChannelId, buildSessionUrl, parseSession };
