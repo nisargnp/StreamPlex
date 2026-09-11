@@ -21,20 +21,26 @@ You can also add channels from the `+` button by typing names separated with spa
 Add a Pluto TV live channel as the final tile with the `pluto` query parameter:
 
 ```text
-https://<your-pages-host>/?streams=channel_one,channel_two&pluto=5da0c85bd2c9c10009370984
+https://<your-pages-host>/?streams=channel_one,channel_two&pluto=29262
 ```
 
 The Pluto value is the stream id from a Pluto TV live URL:
 
 ```text
-https://pluto.tv/us/live-tv/<stream_id>
+https://pluto.tv/us/watch/live-tv/29262/
 ```
 
-Raw stream ids are the canonical URL format. Encoded Pluto live URLs from `pluto.tv` or `www.pluto.tv` are also accepted and normalized back to the stream id when Streamplex rebuilds the page URL.
+Raw stream ids are the canonical URL format. Encoded Pluto live URLs from `pluto.tv` or `www.pluto.tv`, with either `/us/watch/live-tv/<id>/` or `/us/live-tv/<id>/`, are also accepted and normalized back to the stream id when Streamplex rebuilds the page URL.
 
-If `pluto` is omitted or the stream id is invalid, the Pluto tile is hidden. Pluto playback is embedded in an iframe, so its audio and playback controls are managed inside Pluto's player rather than through Streamplex's Twitch audio button.
+For playback, the new numeric ID `29262` is mapped to Naruto's legacy ID `5da0c85bd2c9c10009370984`. Other channels can use their legacy 24-character hexadecimal IDs. Pluto's numeric-ID resolver does not allow cross-origin browser requests; additional verified numeric aliases can be added to `CHANNEL_ALIASES` in `static/pluto.js`. An unmapped numeric ID shows an explicit error, never Pluto's default channel. The tile's `Open` link still works for any valid numeric ID.
 
-Pluto TV is rendered as a cross-origin page iframe. Streamplex cannot inspect Pluto's internal player, so it visually crops a calibrated region of the iframe inside the stream box. If Pluto changes its page layout, the crop constants in `static/app.js` may need retuning.
+If `pluto` is omitted or the stream id is invalid, the Pluto tile is hidden. Playback starts muted to satisfy browser autoplay rules; use the video's native controls to unmute, pause, or go fullscreen. Pluto audio is independent of the Twitch audio buttons. If autoplay needs a user gesture, press the video's play button.
+
+The September 2026 Pluto website stalls on “Optimizing your video playback experience” inside a cross-site iframe. Testing isolated the failure to first-party session-cookie availability. Streamplex therefore uses a fresh anonymous session from Pluto's web playback service and plays its ad-supported HLS stream directly, without embedding the webpage, changing cookie settings, using a proxy, or persisting session tokens. The pinned, integrity-checked hls.js 1.7.2 player loads from jsDelivr only when a Pluto tile is present, with native HLS as a fallback for browsers without compatible Media Source support.
+
+The video uses `object-fit: contain`, so the entire picture is centered at the maximum size that fits each tile. Black bars fill any unused space. Window resizing, tile resizing, and changes to the video's own aspect ratio need no crop calibration or playback restart.
+
+Startup and stalled playback have timeouts, bounded reconnection attempts, and a manual retry button. These Pluto web-client endpoints are not a guaranteed public embed API: service changes, regional availability, or blockers can still prevent playback. The `Open` link provides a direct-site fallback. No geo-restrictions, DRM, or ad segments are bypassed.
 
 ## Local Preview
 
@@ -49,6 +55,20 @@ Then open:
 ```text
 http://127.0.0.1:8000/?streams=channel_one,channel_two,channel_three
 ```
+
+Run the offline Pluto URL/session regression checks with Node.js:
+
+```bash
+node --test tests/pluto.test.cjs
+```
+
+To verify actual playback, start a **disposable** Chrome profile with remote debugging on port 9222 and keep the local server above running. Then use Node 22 or newer:
+
+```bash
+node tests/pluto.browser.mjs
+```
+
+This opt-in test uses a fresh isolated browser context, checks advancing decoded video frames through desktop/portrait/fractional tile resizes, checks unmapped IDs, and blocks/unblocks the playback service to verify retry. It requires network access and Pluto availability in your region. `CDP_URL` and `STREAMPLEX_URL` override the defaults (`http://127.0.0.1:9222` and `http://127.0.0.1:8000/`). It does not modify browser cookie or security settings.
 
 ## GitHub Pages
 

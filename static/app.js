@@ -11,8 +11,9 @@ const themeColorMeta = document.querySelector('meta[name="theme-color"]');
 const emptyStateText = emptyState ? emptyState.querySelector("p") : null;
 const STREAMS_QUERY_PARAM = "streams";
 const PLUTO_QUERY_PARAM = "pluto";
-const PLUTO_LIVE_TV_BASE_URL = "https://pluto.tv/us/live-tv/";
-const PLUTO_STREAM_ID_PATTERN = /^[a-f0-9]{24}$/i;
+const PLUTO_LIVE_TV_BASE_URL = "https://pluto.tv/us/watch/live-tv/";
+const PLUTO_LEGACY_LIVE_TV_BASE_URL = "https://pluto.tv/us/live-tv/";
+const PLUTO_STREAM_ID_PATTERN = /^(?:[1-9][0-9]*|[a-f0-9]{24})$/i;
 const PLUTO_HOSTS = new Set(["pluto.tv", "www.pluto.tv"]);
 const currentChannels = parseInitialChannels();
 const currentPlutoStream = parseInitialPlutoStream();
@@ -28,21 +29,6 @@ const POLL_INTERVAL_MS = 300000;
 const PROBE_TIMEOUT_MS = 8000;
 const FETCH_PROBE_TIMEOUT_MS = 5000;
 const PREFERRED_QUALITY_PATTERN = /^480p(?:\d+)?$/i;
-// Pluto is cross-origin, so crop the full page iframe as an opaque visual surface.
-const PLUTO_FRAME_WIDTH = 1280;
-const PLUTO_FRAME_HEIGHT = 720;
-// "contain" preserves the calibrated crop; "cover" fills odd-shaped boxes by cropping more.
-const PLUTO_CROP_FIT = "contain";
-const PLUTO_CROP_RECT = {
-  x: 240,
-  y: 47.571,
-  width: 800,
-  height: 450,
-};
-const PLUTO_FRAME_OFFSET = {
-  x: 0,
-  y: 0.05,
-};
 const PREVIEW_PLACEHOLDER_PATTERNS = [
   /\/ttv-static\/404_/i,
   /\/ttv-static\/403_/i,
@@ -59,9 +45,7 @@ let lastPollState = "checking";
 let autoplaySyncFrame = null;
 let autoplaySyncTimeouts = [];
 let layoutSyncFrame = null;
-let plutoCropSyncFrame = null;
-let plutoResizeObserver = null;
-const pendingPlutoCropShells = new Set();
+let plutoModulePromise;
 let probeSequence = 0;
 let activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
 let activeTheme = getStoredTheme();
@@ -130,6 +114,9 @@ function bindEvents() {
 
   window.addEventListener("resize", scheduleGridLayoutSync);
   window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("pagehide", () => {
+    streamViews.forEach(disposePlutoView);
+  });
 }
 
 function renderChannelPills() {
@@ -174,6 +161,7 @@ function renderChannelPills() {
 }
 
 function renderStreamTiles() {
+  streamViews.forEach(disposePlutoView);
   streamViews.clear();
 
   if (!streamGrid) {
@@ -291,12 +279,17 @@ function parseInitialPlutoStream() {
     return null;
   }
 
+  // Legacy IDs still resolve through Pluto's redirect to the new numeric ID.
+  const baseUrl = /^[a-f0-9]{24}$/i.test(streamId)
+    ? PLUTO_LEGACY_LIVE_TV_BASE_URL
+    : PLUTO_LIVE_TV_BASE_URL;
+
   return {
     id: `pluto-${streamId}`,
     provider: "pluto",
     label: "Pluto TV",
     streamId,
-    url: `${PLUTO_LIVE_TV_BASE_URL}${streamId}`,
+    url: `${baseUrl}${streamId}/`,
   };
 }
 
@@ -741,7 +734,13 @@ function renderOfflineStream(channel) {
   renderShellPlaceholder(view, view.stream.label, "Offline", "offline");
 }
 
-function renderPlutoStream(view) {
+function disposePlutoView(view) {
+  view.plutoGeneration = (view.plutoGeneration || 0) + 1;
+  view.disposePluto?.();
+  view.disposePluto = null;
+}
+
+async function renderPlutoStream(view) {
   if (!isPlutoView(view) || !view.shell) {
     return;
   }
@@ -749,125 +748,28 @@ function renderPlutoStream(view) {
   view.tile.hidden = false;
   view.tile.dataset.live = "true";
   view.tile.dataset.mountPending = "false";
-  view.shell.replaceChildren();
-
-  const iframe = document.createElement("iframe");
-  iframe.className = "pluto-frame";
-  iframe.src = view.stream.url;
-  iframe.title = `${view.stream.label} on Pluto TV`;
-  iframe.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
-  iframe.allowFullscreen = true;
-  iframe.referrerPolicy = "strict-origin-when-cross-origin";
-
-  view.shell.append(iframe);
-  observePlutoShell(view.shell);
-  syncPlutoCrop(view.shell);
-}
-
-function observePlutoShell(shell) {
-  if (!shell || typeof ResizeObserver === "undefined") {
-    return;
-  }
-
-  if (!plutoResizeObserver) {
-    plutoResizeObserver = new ResizeObserver((entries) => {
-      entries.forEach((entry) => {
-        schedulePlutoCropSync(entry.target);
-      });
-    });
-  }
-
-  plutoResizeObserver.observe(shell);
-}
-
-function schedulePlutoCropSync(shell) {
-  if (shell) {
-    pendingPlutoCropShells.add(shell);
-  } else {
-    streamViews.forEach((view) => {
-      if (isPlutoView(view) && view.shell) {
-        pendingPlutoCropShells.add(view.shell);
+  disposePlutoView(view);
+  const generation = view.plutoGeneration;
+  renderShellPlaceholder(view, view.stream.label, "Loading video player…", "pending");
+  try {
+    if (!window.StreamplexPluto) {
+      // Import from app.js so even a cached older index.html can load the new
+      // player. Do not load any Pluto dependencies on Twitch-only pages.
+      if (!plutoModulePromise) {
+        plutoModulePromise = import(`./pluto.js?v=${Date.now()}`).catch((error) => {
+          plutoModulePromise = null;
+          throw error;
+        });
       }
-    });
-  }
-
-  if (plutoCropSyncFrame) {
-    return;
-  }
-
-  plutoCropSyncFrame = window.requestAnimationFrame(() => {
-    plutoCropSyncFrame = null;
-    const shells = [...pendingPlutoCropShells];
-    pendingPlutoCropShells.clear();
-    shells.forEach((entry) => syncPlutoCrop(entry));
-  });
-}
-
-function syncAllPlutoCrops() {
-  streamViews.forEach((view) => {
-    if (isPlutoView(view) && view.shell) {
-      syncPlutoCrop(view.shell);
+      await plutoModulePromise;
     }
-  });
-}
-
-function syncPlutoCrop(shell) {
-  if (!shell || !shell.querySelector(".pluto-frame")) {
-    return;
+    if (generation !== view.plutoGeneration) return;
+    view.disposePluto = window.StreamplexPluto.mount(view.shell, view.stream.streamId);
+  } catch (error) {
+    if (generation === view.plutoGeneration) {
+      renderShellPlaceholder(view, view.stream.label, "Video player could not load. Reload, or use Open to watch on Pluto TV.", "offline");
+    }
   }
-
-  const rect = shell.getBoundingClientRect();
-  const shellWidth = Math.max(rect.width || shell.clientWidth || 0, 0);
-  const shellHeight = Math.max(rect.height || shell.clientHeight || 0, 0);
-
-  if (shellWidth <= 0 || shellHeight <= 0) {
-    return;
-  }
-
-  const scale = getPlutoCropScale(shellWidth, shellHeight);
-  const x =
-    (shellWidth - PLUTO_CROP_RECT.width * scale) / 2 -
-    PLUTO_CROP_RECT.x * scale +
-    shellWidth * PLUTO_FRAME_OFFSET.x;
-  const y =
-    (shellHeight - PLUTO_CROP_RECT.height * scale) / 2 -
-    PLUTO_CROP_RECT.y * scale +
-    shellHeight * PLUTO_FRAME_OFFSET.y;
-
-  shell.style.setProperty("--pluto-frame-width", `${PLUTO_FRAME_WIDTH}px`);
-  shell.style.setProperty("--pluto-frame-height", `${PLUTO_FRAME_HEIGHT}px`);
-  shell.style.setProperty("--pluto-frame-scale", formatCssNumber(scale));
-  shell.style.setProperty("--pluto-frame-x", formatCssPixels(x));
-  shell.style.setProperty("--pluto-frame-y", formatCssPixels(y));
-}
-
-function getPlutoCropScale(shellWidth, shellHeight) {
-  const widthScale = shellWidth / PLUTO_CROP_RECT.width;
-  const heightScale = shellHeight / PLUTO_CROP_RECT.height;
-
-  if (PLUTO_CROP_FIT === "cover") {
-    return Math.max(widthScale, heightScale);
-  }
-
-  return Math.min(widthScale, heightScale);
-}
-
-function formatCssNumber(value) {
-  if (!Number.isFinite(value)) {
-    return "1";
-  }
-
-  const formattedValue = value.toFixed(4).replace(/\.?0+$/, "");
-  return formattedValue || "0";
-}
-
-function formatCssPixels(value) {
-  if (!Number.isFinite(value)) {
-    return "0px";
-  }
-
-  const formattedValue = value.toFixed(3).replace(/\.?0+$/, "");
-  return `${formattedValue || "0"}px`;
 }
 
 function renderShellPlaceholder(view, channel, message, state) {
@@ -1177,7 +1079,6 @@ function syncGridLayout() {
     "--grid-height",
     `${rows * tileHeight + gap * Math.max(rows - 1, 0)}px`
   );
-  syncAllPlutoCrops();
   window.requestAnimationFrame(() => {
     mountPendingPlayers();
     if (players.size) {
@@ -1410,7 +1311,7 @@ function sanitizePlutoStreamId(value) {
   if (/^https?:\/\//i.test(trimmedValue)) {
     try {
       const url = new URL(trimmedValue);
-      const pathMatch = url.pathname.match(/^\/us\/live-tv\/([^/?#]+)\/?$/i);
+      const pathMatch = url.pathname.match(/^\/us\/(?:watch\/)?live-tv\/([^/?#]+)\/?$/i);
       candidate = PLUTO_HOSTS.has(url.hostname.toLowerCase()) && pathMatch ? pathMatch[1] : "";
     } catch (error) {
       candidate = "";
