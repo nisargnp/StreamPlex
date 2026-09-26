@@ -174,3 +174,51 @@ test("unknown checks are reported as incomplete, and stale checks cannot resurre
   resolve("live");
   assert.equal(await polling, false);
 });
+
+test("polling an errored Twitch tile hides it when offline and retries when status is unknown", async () => {
+  const app = load();
+  vm.runInContext(`
+    const view = {stream:{provider:'twitch'},playbackError:true,tile:{hidden:false,dataset:{live:'pending',mountPending:'loading'}}};
+    streamViews.set('channel',view);
+    safelyProbeStreamPreview=async()=> 'offline';
+    renderOfflineStream=()=>{view.tile.hidden=true;view.tile.dataset.live='false'};
+    renderLiveStream=()=>{view.tile.hidden=false;view.tile.dataset.live='true';view.tile.dataset.mountPending='true'};
+    setChannelStatus=()=>{};syncGridLayout=()=>{};
+  `, app);
+  assert.equal(await app.pollStreamStatuses(), true);
+  assert.equal(vm.runInContext("view.tile.hidden && !view.playbackError", app), true);
+
+  vm.runInContext("view.playbackError=true;view.tile.dataset.mountPending='loading';safelyProbeStreamPreview=async()=> 'unknown'", app);
+  assert.equal(await app.pollStreamStatuses(), false);
+  assert.equal(vm.runInContext("!view.tile.hidden && !view.playbackError && view.tile.dataset.mountPending==='true'", app), true);
+});
+
+test("an in-flight failure check cannot hide a stream after manual retry", async () => {
+  const app = load();
+  let finish;
+  app.previewResult = new Promise((resolve) => { finish = resolve; });
+  vm.runInContext(`
+    const view = {stream:{provider:'twitch'},playbackError:true,mountGeneration:2,tile:{dataset:{}}};
+    streamViews.set('channel',view);
+    safelyProbeStreamPreview=()=>previewResult;
+    renderOfflineStream=()=>{throw Error('stale failure check applied')};
+  `, app);
+  const checking = app.refreshUnmountedTwitchStream("channel", vm.runInContext("view", app), vm.runInContext("pollEpoch", app));
+  vm.runInContext("view.playbackError=false", app);
+  finish("offline");
+  await checking;
+});
+
+test("repeated playback failures wait for polling after one immediate recovery attempt", () => {
+  const app = load();
+  vm.runInContext(`
+    const view = {stream:{provider:'twitch'},tile:{hidden:false,dataset:{}},audioButton:{}};
+    streamViews.set('channel',view);
+    let recoveryChecks = 0;
+    teardownPlayer=()=>{};showTwitchNotice=()=>{};setChannelStatus=()=>{};syncGridLayout=()=>{};
+    refreshUnmountedTwitchStream=()=>{recoveryChecks++};
+  `, app);
+  app.showTwitchFailure("channel", "failed");
+  app.showTwitchFailure("channel", "failed again");
+  assert.equal(vm.runInContext("recoveryChecks", app), 1);
+});

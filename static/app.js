@@ -23,7 +23,7 @@ const pillViews = new Map();
 const players = new Map();
 const audioVolumes = new Map();
 const probeControllers = new Set();
-const APP_VERSION = "2026-09-11.3";
+const APP_VERSION = "2026-09-26.1";
 const TWITCH_VIEWPORT_WIDTH = 400;
 const TWITCH_VIEWPORT_HEIGHT = 300;
 const THEME_STORAGE_KEY = "streamplex-theme";
@@ -510,26 +510,36 @@ async function pollStreamStatuses(epoch = pollEpoch) {
 
   // Process each result immediately; one slow thumbnail must not hold back
   // all the other players. A mounted SDK is a better status source than images.
-  const results = await Promise.all(
+  await Promise.all(
     channels.map(async (channel) => {
       const view = streamViews.get(channel);
-      if (players.has(channel)) return view.ready && !view.playbackError;
-      if (view.tile.dataset.mountPending === "loading" || view.playbackError) return false;
-      const state = await safelyProbeStreamPreview(channel);
-      if (epoch !== pollEpoch || streamViews.get(channel) !== view) return false;
-      if (state === "offline") {
-        renderOfflineStream(channel);
-        setChannelStatus(channel, "offline");
-      } else {
-        // Unknown never means offline. Let the official embedded player decide.
-        renderLiveStream(channel);
-        setChannelStatus(channel, state === "live" ? "live" : "pending");
-      }
-      syncGridLayout();
-      return state !== "unknown";
+      if (players.has(channel) || (view.tile.dataset.mountPending === "loading" && !view.playbackError)) return;
+      await refreshUnmountedTwitchStream(channel, view, epoch);
     })
   );
-  return results.every(Boolean) || twitchStatusesResolved();
+  return twitchStatusesResolved();
+}
+
+async function refreshUnmountedTwitchStream(channel, view, epoch) {
+  const generation = view.mountGeneration || 0;
+  const wasFailed = Boolean(view.playbackError);
+  const state = await safelyProbeStreamPreview(channel);
+  if (epoch !== pollEpoch || streamViews.get(channel) !== view ||
+      generation !== (view.mountGeneration || 0) ||
+      Boolean(view.playbackError) !== wasFailed || players.has(channel)) return;
+
+  view.playbackError = false;
+  if (state === "offline") {
+    view.autoRecoveryTried = false;
+    renderOfflineStream(channel);
+    setChannelStatus(channel, "offline");
+    refreshStatusFromPlayers();
+  } else {
+    // Unknown never means offline. Let the official embedded player decide.
+    renderLiveStream(channel);
+    setChannelStatus(channel, state === "live" ? "live" : "pending");
+  }
+  syncGridLayout();
 }
 
 function twitchStatusesResolved() {
@@ -820,6 +830,7 @@ async function mountPlayer(channel, view) {
     });
     on(SDK.Player.OFFLINE, () => {
       clearWatchdog();
+      view.autoRecoveryTried = false;
       // Keep the selected offline player to receive ONLINE without five-minute
       // thumbnail guesses or repeated SDK construction. Destroy it on removal.
       view.tile.hidden = true;
@@ -830,6 +841,7 @@ async function mountPlayer(channel, view) {
     });
     on(SDK.Player.PLAYING, () => {
       view.hasPlayed = true;
+      view.autoRecoveryTried = false;
       clearWatchdog();
       view.notice?.remove();
       view.notice = null;
@@ -919,6 +931,11 @@ function showTwitchFailure(channel, message) {
   });
   setChannelStatus(channel, "pending");
   syncGridLayout();
+  // Retry once now; repeated failures wait for the regular status poll.
+  if (!view.autoRecoveryTried) {
+    view.autoRecoveryTried = true;
+    void refreshUnmountedTwitchStream(channel, view, pollEpoch);
+  }
 }
 
 function renderOfflineStream(channel) {

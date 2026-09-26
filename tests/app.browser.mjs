@@ -27,6 +27,26 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function fixtures() {
   window.fakeInstances = [];
   window.fakePlutoDisposals = 0;
+  window.fakeStalledChannels = new Set();
+  // Exercise the actual watchdog and scheduled poll callbacks without waiting
+  // thirty seconds or five minutes. All other browser timers run normally.
+  const nativeSetTimeout = window.setTimeout.bind(window);
+  const nativeClearTimeout = window.clearTimeout.bind(window);
+  const controlledTimers = new Map();
+  window.setTimeout = (callback, delay, ...args) => {
+    if (delay !== 30000 && delay !== 300000) return nativeSetTimeout(callback, delay, ...args);
+    const invoke = () => { controlledTimers.delete(id); return callback(...args); };
+    const id = nativeSetTimeout(invoke, delay);
+    controlledTimers.set(id, invoke);
+    return id;
+  };
+  window.clearTimeout = (id) => { controlledTimers.delete(id); nativeClearTimeout(id); };
+  window.fireControlledTimer = (id) => {
+    const invoke = controlledTimers.get(id);
+    if (!invoke) throw Error(`Timer ${id} is not active`);
+    nativeClearTimeout(id);
+    return invoke();
+  };
   class Player {
     constructor(id, options) {
       this.options = options;
@@ -42,7 +62,10 @@ function fixtures() {
     addEventListener(event, fn) { if (!this.events.has(event)) this.events.set(event, new Set()); this.events.get(event).add(fn); }
     removeEventListener(event, fn) { this.events.get(event)?.delete(fn); }
     emit(event) { this.events.get(event)?.forEach((fn) => fn()); }
-    play() { this.plays++; this.paused = false; this.emit("play"); this.emit("playing"); }
+    play() {
+      this.plays++; this.paused = false; this.emit("play");
+      if (!window.fakeStalledChannels.has(this.channel)) this.emit("playing");
+    }
     pause() { this.paused = true; this.emit("pause"); }
     isPaused() { return this.paused; }
     getQualities() { return [{ group: "auto" }, { group: "720p60" }, { group: "480p30" }]; }
@@ -156,6 +179,29 @@ try {
   await run("originalOne.emit('online')");
   assert.equal(await run("!streamViews.get('one').tile.hidden && originalOne.paused"), true);
   console.log("PASS offline/online events reuse the selected player and preserve pause");
+  await run("originalOne.play();window.failedPlayer=players.get('one');failedPlayer.emit('error')");
+  await wait("players.has('one') && players.get('one')!==failedPlayer && streamViews.get('one').ready && !streamViews.get('one').tile.hidden");
+  assert.equal(await run("failedPlayer.destroyed && !streamViews.get('one').playbackError && !players.get('one').paused"), true);
+  console.log("PASS a transient Twitch error automatically restores playback");
+  await run(`window.previewFetch=window.fetch;window.fetch=(url,options)=>String(url).includes('live_user_one-')
+    ? Promise.resolve({ok:false,status:404,url:String(url)}) : previewFetch(url,options);
+    players.get('one').emit('error')`);
+  await wait("streamViews.get('one').tile.hidden && !players.has('one') && streamViews.get('one').tile.dataset.live==='false'");
+  await run("window.fetch=previewFetch;runPollCycle()");
+  await wait("players.has('one') && streamViews.get('one').ready && !streamViews.get('one').tile.hidden");
+  console.log("PASS a failed offline stream disappears and the next poll restores it when live");
+  await run("window.healthyPlayer=players.get('two');fakeStalledChannels.add('timeout');navigateToChannels(['one','two','timeout'])");
+  await wait("streamViews.get('timeout')?.ready && !streamViews.get('timeout').hasPlayed && !pollInFlight");
+  await run("fireControlledTimer(streamViews.get('timeout').startupTimer)");
+  await wait("fakeInstances.filter(p=>p.channel==='timeout').length===2 && streamViews.get('timeout').ready");
+  await run("fireControlledTimer(streamViews.get('timeout').startupTimer)");
+  await pause(150);
+  assert.equal(await run("streamViews.get('timeout').playbackError && !players.has('timeout') && streamViews.get('timeout').notice.textContent.includes('Twitch did not start') && fakeInstances.filter(p=>p.channel==='timeout').length===2"), true);
+  await run("fakeStalledChannels.delete('timeout');fireControlledTimer(pollTimer)");
+  await wait("streamViews.get('timeout').hasPlayed && !streamViews.get('timeout').playbackError && players.has('timeout')");
+  assert.equal(await run("fakeInstances.filter(p=>p.channel==='timeout').length===3 && players.get('two')===healthyPlayer"), true);
+  assert.equal(await listeners(), 6);
+  console.log("PASS startup timeout retries once, repeated timeout waits, and the scheduled poll recovers without disturbing healthy players or leaking listeners");
   await run("navigateToChannels([]); delete window.Twitch");
   assert.equal(await listeners(), 0);
   await send("Network.setBlockedURLs", { urls: ["*player.twitch.tv*"] }, sessionId);

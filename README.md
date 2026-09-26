@@ -117,6 +117,7 @@ Behavior:
 - A 403, network failure, or unavailable cross-origin response means **unknown**, never offline. A successfully loaded image alone is not evidence of a live stream.
 - Unknown channels can mount the official Twitch player to determine status. Once mounted, ONLINE/OFFLINE events take precedence over thumbnail guesses; thumbnail failures cannot hide that player.
 - Selected offline SDK players are retained to receive ONLINE promptly, and are destroyed when removed. No repeated SDK construction is needed for offline/online transitions.
+- If Twitch playback fails, Streamplex checks the preview immediately. A confirmed offline result hides the tile; a live or unknown result retries the official player once. Later status polls retry unresolved failures. Persistent failures keep the manual Retry playback and Open on Twitch options visible.
 - Results are applied individually, so a slow thumbnail does not delay the others. URL changes invalidate and abort stale checks. Incomplete checks show a retry state; Refresh runs a new check immediately.
 
 Because this runs entirely in the browser, it is less authoritative than the earlier server-side probe, but it is compatible with GitHub Pages.
