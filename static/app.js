@@ -23,7 +23,7 @@ const pillViews = new Map();
 const players = new Map();
 const audioVolumes = new Map();
 const probeControllers = new Set();
-const APP_VERSION = "2026-09-26.1";
+const APP_VERSION = "2026-09-27.11";
 const TWITCH_VIEWPORT_WIDTH = 400;
 const TWITCH_VIEWPORT_HEIGHT = 300;
 const THEME_STORAGE_KEY = "streamplex-theme";
@@ -1277,7 +1277,7 @@ function applyTheme(theme) {
   }
 
   if (themeColorMeta) {
-    themeColorMeta.setAttribute("content", isLight ? "#f5f5f2" : "#000000");
+    themeColorMeta.setAttribute("content", isLight ? "#f1f1ef" : "#121212");
   }
 }
 
