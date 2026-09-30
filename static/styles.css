@@ -73,7 +73,7 @@ button {
 
 .channel-bar {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 0.35rem;
   padding: 0.22rem 0.08rem 0.3rem;
   margin-bottom: 0.5rem;
@@ -82,6 +82,7 @@ button {
 
 .channel-list {
   display: flex;
+  align-items: center;
   flex: 1 1 auto;
   min-width: 0;
   gap: 0.35rem;
@@ -99,8 +100,7 @@ button {
   align-items: center;
   flex: 0 0 auto;
   gap: 0.35rem;
-  margin-top: -4px;
-  padding: 0.2rem 0.35rem;
+  padding: 0.22rem 0.35rem 0.2rem;
   border: 1px solid var(--line);
   border-radius: 0.75rem;
 }
@@ -292,6 +292,7 @@ html[data-theme="light"] .theme-toggle-knob {
 }
 
 .stream-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -312,25 +313,7 @@ html[data-theme="light"] .theme-toggle-knob {
   display: none !important;
 }
 
-.stream-name {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.4rem;
-  padding: 0.28rem 0.55rem;
-  border-bottom: 1px solid var(--line);
-}
-
-.stream-name-label {
-  min-width: 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.stream-audio-button {
+.stream-control-button {
   flex: 0 0 auto;
   min-height: 1.2rem;
   padding: 0.1rem 0.42rem;
@@ -342,26 +325,22 @@ html[data-theme="light"] .theme-toggle-knob {
   line-height: 1;
 }
 
-.stream-audio-button:disabled {
+.stream-control-button:disabled {
   opacity: 0.38;
   cursor: default;
 }
 
-.stream-audio-button:hover {
+.stream-control-button:hover {
   border-color: var(--line-strong);
   color: var(--text);
 }
 
-.stream-audio-button:disabled:hover {
+.stream-control-button:disabled:hover {
   border-color: var(--line);
   color: var(--muted);
 }
 
-.stream-audio-button.active {
-  border-color: var(--line-strong);
-  background: var(--control-active-bg);
-  color: var(--text);
-}
+.channel-pill-open { margin-left: 0.4rem; text-decoration: none; }
 
 .player-shell {
   position: relative;
@@ -415,16 +394,11 @@ html[data-theme="light"] .theme-toggle-knob {
   text-align: center;
 }
 
-.stream-actions {
-  display: flex;
-  gap: 0.4rem;
-}
-
 .player-notice a { color: #fff; }
-.player-notice .stream-audio-button,
-.pluto-notice .stream-audio-button { color: #fff; border-color: #777; }
+.player-notice .stream-control-button,
+.pluto-notice .stream-control-button { color: #fff; border-color: #777; }
 
-.stream-grid-compact .stream-name { display: none; }
+.notice-channel { max-width: 100%; overflow-wrap: anywhere; }
 
 .pluto-notice[hidden],
 .pluto-notice button[hidden] {

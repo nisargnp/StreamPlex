@@ -71,9 +71,9 @@ function fixtures() {
     getQualities() { return [{ group: "auto" }, { group: "720p60" }, { group: "480p30" }]; }
     getQuality() { return this.quality; }
     setQuality(value) { this.quality = value; }
-    setMuted(value) { this.muted = value; }
+    setMuted(value) { this.audioWrites = (this.audioWrites || 0) + 1; this.muted = value; }
     getMuted() { return this.muted; }
-    setVolume(value) { this.volume = value; }
+    setVolume(value) { this.audioWrites = (this.audioWrites || 0) + 1; this.volume = value; }
     getVolume() { return this.volume; }
     destroy() { this.destroyed = true; this.events.clear(); window.removeEventListener("message", this.forward); this.iframe.remove(); }
   }
@@ -81,8 +81,8 @@ function fixtures() {
   window.Twitch = window.fakeSDK = { Player };
   window.StreamplexPluto = { mount(shell, id, callbacks) {
     const video = document.createElement("video"); video.className = "pluto-video"; video.muted = true;
-    video.addEventListener("volumechange", () => callbacks.onAudioChange({ muted: video.muted, volume: video.volume }));
-    shell.replaceChildren(video); callbacks.onReady();
+    video.controls = true;
+    shell.replaceChildren(video); callbacks.onReady?.(); callbacks.onChannelName?.("Naruto");
     return () => { window.fakePlutoDisposals++; };
   } };
   const fetch = window.fetch.bind(window);
@@ -111,9 +111,10 @@ try {
         pageWidth:document.documentElement.scrollWidth, pageHeight:document.documentElement.scrollHeight,
         fits:tiles.every(t=>{const r=t.getBoundingClientRect();const s=t.querySelector('.player-shell').getBoundingClientRect();
           const frame=t.querySelector('iframe');const f=frame?.getBoundingClientRect();
+          const fullTile=!t.querySelector('header') && Math.abs(s.top-r.top-1)<1 && Math.abs(s.bottom-r.bottom+1)<1;
           const playerFits=!frame || (frame.clientWidth>=400 && frame.clientHeight>=300 &&
             f.left>=s.left-0.5 && f.top>=s.top-0.5 && Math.abs(f.right-s.right)<1 && Math.abs(f.bottom-s.bottom)<1);
-          return playerFits && r.left>=0 && r.top>=0 && r.right<=innerWidth+0.5 && r.bottom<=innerHeight+0.5 && s.width>0 && s.height>0;})};
+          return fullTile && playerFits && r.left>=0 && r.top>=0 && r.right<=innerWidth+0.5 && r.bottom<=innerHeight+0.5 && s.width>0 && s.height>0;})};
     })()`);
     assert.equal(layout.count, count, JSON.stringify(layout));
     assert.equal(layout.fits, true, JSON.stringify(layout));
@@ -129,6 +130,8 @@ try {
   await run("window.originalOne=players.get('one');window.originalPluto=document.querySelector('.pluto-video')");
   assert.equal(await run("[...players.values()].every(p=>p.options.autoplay===true && p.options.muted===true)"), true);
   assert.equal(await listeners(), 4);
+  assert.equal(await run("[...players.values()].every(p=>p.muted) && originalPluto.muted && originalPluto.controls && !document.querySelector('.stream-name,[data-audio-channel]') && document.querySelector('[data-channel-pill=\"pluto-29262\"] .channel-pill-label').textContent==='Naruto' && !!document.querySelector('.channel-pill .channel-pill-open')"), true);
+  console.log("PASS native controls, channel names and Open link in the shared bar; all players start muted without tile headers");
   await run("originalOne.pause(); originalOne.quality='720p60'; originalOne.emit('playing')");
   for (const [w, h] of [[390,844], [1280,720], [1920,1080]]) {
     await resize(w, h); await pause(150);
@@ -156,13 +159,10 @@ try {
   await run("window.originalOne=players.get('one');originalOne.pause()");
   assert.equal(await run("document.querySelector('.pluto-video')===originalPluto && fakePlutoDisposals===0"), true);
   console.log("PASS 1–36 mixed-provider tiles at five viewport sizes: no page scrolling or clipped videos");
-  await run("setActiveAudioChannel('one');originalOne.volume=0.23;setActiveAudioChannel('two');setActiveAudioChannel('two');setActiveAudioChannel('one')");
-  assert.equal(await run("originalOne.volume===0.23 && originalOne.paused && !originalOne.muted && players.get('two').muted"), true);
-  await run("setActiveAudioChannel('pluto-29262')"); await pause(100);
-  assert.equal(await run("originalOne.muted && !originalPluto.muted"), true);
-  await run("setActiveAudioChannel('two')"); await pause(100);
-  assert.equal(await run("originalPluto.muted && !players.get('two').muted"), true);
-  console.log("PASS exclusive provider audio, toggle-off, volume preservation, no forced playback");
+  await run("originalOne.setMuted(false);originalOne.setVolume(0.23);players.get('two').setMuted(false);players.get('two').setVolume(0.7);originalPluto.muted=false;originalPluto.volume=0.31;window.audioWritesBeforePoll=[...players.values()].map(p=>p.audioWrites)");
+  await run("runPollCycle()"); await pause(1100);
+  assert.equal(await run("originalOne.volume===0.23 && originalOne.paused && !originalOne.muted && !players.get('two').muted && players.get('two').volume===0.7 && !originalPluto.muted && originalPluto.volume===0.31 && [...players.values()].every((p,i)=>p.audioWrites===audioWritesBeforePoll[i])"), true);
+  console.log("PASS independent native audio and volume; polling sends no audio commands or forced playback");
   for (let i = 0; i < 5; i++) {
     await run("navigateToChannels(['one','two','three'])"); await wait("players.has('three') && streamViews.get('three').ready");
     await run("navigateToChannels(['one','two'])");
@@ -174,14 +174,18 @@ try {
   await run("history.forward()"); await wait("!currentChannels.includes('three') && !players.has('three')");
   assert.equal(await run("players.get('one')===originalOne"), true);
   console.log("PASS browser Back/Forward reconciles URL without restarting retained players");
+  await run("renderPlutoStream(streamViews.get('pluto-29262'))"); await pause(100);
+  assert.equal(await run("document.querySelector('.pluto-video')!==originalPluto && !document.querySelector('.pluto-video').muted && document.querySelector('.pluto-video').volume===0.31"), true);
+  console.log("PASS Pluto remount preserves native mute and volume preferences");
   await run("originalOne.emit('offline')");
   assert.equal(await run("streamViews.get('one').tile.hidden && players.get('one')===originalOne"), true);
   await run("originalOne.emit('online')");
   assert.equal(await run("!streamViews.get('one').tile.hidden && originalOne.paused"), true);
   console.log("PASS offline/online events reuse the selected player and preserve pause");
-  await run("originalOne.play();window.failedPlayer=players.get('one');failedPlayer.emit('error')");
+  await run("originalOne.play();window.failedPlayer=players.get('one');failedPlayer.emit('error');window.failureChannel=document.querySelector('.notice-channel')?.textContent");
+  assert.equal(await run("failureChannel"), "one");
   await wait("players.has('one') && players.get('one')!==failedPlayer && streamViews.get('one').ready && !streamViews.get('one').tile.hidden");
-  assert.equal(await run("failedPlayer.destroyed && !streamViews.get('one').playbackError && !players.get('one').paused"), true);
+  assert.equal(await run("failedPlayer.destroyed && !streamViews.get('one').playbackError && !players.get('one').paused && !players.get('one').muted && players.get('one').volume===0.23"), true);
   console.log("PASS a transient Twitch error automatically restores playback");
   await run(`window.previewFetch=window.fetch;window.fetch=(url,options)=>String(url).includes('live_user_one-')
     ? Promise.resolve({ok:false,status:404,url:String(url)}) : previewFetch(url,options);
@@ -196,7 +200,7 @@ try {
   await wait("fakeInstances.filter(p=>p.channel==='timeout').length===2 && streamViews.get('timeout').ready");
   await run("fireControlledTimer(streamViews.get('timeout').startupTimer)");
   await pause(150);
-  assert.equal(await run("streamViews.get('timeout').playbackError && !players.has('timeout') && streamViews.get('timeout').notice.textContent.includes('Twitch did not start') && fakeInstances.filter(p=>p.channel==='timeout').length===2"), true);
+  assert.equal(await run("streamViews.get('timeout').playbackError && !players.has('timeout') && streamViews.get('timeout').notice.textContent.includes('Twitch did not start') && streamViews.get('timeout').notice.querySelector('.notice-channel').textContent==='timeout' && fakeInstances.filter(p=>p.channel==='timeout').length===2"), true);
   await run("fakeStalledChannels.delete('timeout');fireControlledTimer(pollTimer)");
   await wait("streamViews.get('timeout').hasPlayed && !streamViews.get('timeout').playbackError && players.has('timeout')");
   assert.equal(await run("fakeInstances.filter(p=>p.channel==='timeout').length===3 && players.get('two')===healthyPlayer"), true);
@@ -207,8 +211,13 @@ try {
   await send("Network.setBlockedURLs", { urls: ["*player.twitch.tv*"] }, sessionId);
   await run("navigateToChannels(['failure'])");
   await wait("document.querySelector('.player-notice')?.innerText.includes('Retry playback')");
+  assert.equal(await run("document.querySelector('.notice-channel').textContent"), "failure");
   await run("window.Twitch=window.fakeSDK;document.querySelector('.player-notice button').click()");
   await wait("players.has('failure') && streamViews.get('failure').ready");
+  await run("players.get('failure').emit('playback_blocked')");
+  // Fixture event constants use the underscore form of PLAYBACK_BLOCKED.
+  assert.equal(await run("document.querySelector('.notice-channel').textContent"), "failure");
+  await run("document.querySelector('.player-notice button').click()");
   console.log("PASS SDK failure shows actionable retry and recovers without reloading the page");
   for (const [w, h] of [[390,844], [844,390], [1280,720]]) {
     await resize(w, h);
@@ -224,6 +233,16 @@ try {
   await wait("players.has('layout0') && streamViews.get('layout0').ready");
   assert.equal(await run("players.get('layout0').options.autoplay===false && players.get('layout0').paused && players.get('layout0').plays===0 && streamViews.get('layout0').startupTimer===null"), true);
   console.log("PASS intentional pause also survives provider remount without an autoplay timeout");
+  await run("navigateToChannels(['reloadone','reloadtwo'],makePlutoStream('29262'))");
+  await wait("players.size===2 && [...streamViews.values()].filter(v=>v.stream.provider==='twitch').every(v=>v.ready)");
+  await run("players.get('reloadone').setMuted(false);players.get('reloadone').setVolume(0.42);document.querySelector('.pluto-video').muted=false;document.querySelector('.pluto-video').volume=0.27");
+  await run("runPollCycle()");
+  assert.equal(await run("!players.get('reloadone').muted && players.get('reloadone').volume===0.42 && !document.querySelector('.pluto-video').muted && document.querySelector('.pluto-video').volume===0.27"), true);
+  await send("Page.reload", { ignoreCache: true }, sessionId);
+  await wait("typeof players!=='undefined' && players.size===2 && [...players.values()].every(p=>streamViews.get(p.channel).ready)");
+  assert.equal(await run("[...players.values()].every(p=>p.muted && p.options.muted===true) && document.querySelector('.pluto-video').muted"), true);
+  await assertFits(3);
+  console.log("PASS polling preserves native audio; browser reload starts both providers muted");
   assert.deepEqual(exceptions, []);
 } finally {
   if (context) await send("Target.disposeBrowserContext", context);

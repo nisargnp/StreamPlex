@@ -217,6 +217,7 @@ test("fatal playback failures reconnect at most twice before showing retry", asy
   assert.equal(notice.hidden, false);
   assert.equal(notice.children[1].hidden, false);
   assert.match(notice.children[0].textContent, /interrupted/);
+  assert.match(notice.children[0].textContent, /^Naruto:/);
   notice.children[1].emit("click");
   await h.flush();
   assert.equal(h.instances.length, 4);
@@ -228,6 +229,7 @@ test("startup timeout invalidates late network responses", async () => {
   const h = playerHarness(() => new Promise((r) => { resolve = r; }));
   const dispose = h.api.mount(h.shell, "29262");
   h.fireTimer(30000);
+  assert.match(h.shell.children[1].children[0].textContent, /^Pluto TV \(29262\):/);
   resolve({ ok: true, json: async () => sessionFixture() });
   await h.flush();
   assert.equal(h.instances.length, 0, "stale response must not attach a player");
@@ -242,6 +244,7 @@ test("unmapped numeric ID shows an actionable error without fetching", async () 
   assert.equal(h.requests.length, 0);
   assert.equal(h.timers.size, 0);
   assert.match(h.shell.children[1].children[0].textContent, /not mapped/);
+  assert.match(h.shell.children[1].children[0].textContent, /^Pluto TV \(999999\):/);
   assert.equal(h.shell.children[1].children[1].hidden, false);
   dispose();
 });

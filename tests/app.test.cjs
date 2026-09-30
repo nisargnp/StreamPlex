@@ -65,18 +65,28 @@ test("paused players stay paused when playback is requested", () => {
   assert.equal(plays, 1);
 });
 
-test("audio toggles off, preserves volume, and never calls play", () => {
+test("audio starts muted on reload and preserves native settings across recovery without playing", () => {
   const app = load();
-  const player = { muted: true, volume: 0.5, getVolume() { return this.volume; }, setMuted(v) { this.muted = v; }, setVolume(v) { this.volume = v; }, play() { throw Error("audio must not play"); } };
-  app.player = player;
-  vm.runInContext(`players.set('channel',player);streamViews.set('channel',{ready:true,stream:{provider:'twitch'}})`, app);
-  app.setActiveAudioChannel("channel");
-  player.volume = 0.23;
-  app.setActiveAudioChannel("channel");
+  const player = { muted: false, volume: 0.9, getMuted() { return this.muted; }, getVolume() { return this.volume; }, setMuted(v) { this.muted = v; }, setVolume(v) { this.volume = v; }, play() { throw Error("audio must not play"); } };
+  app.applyPlayerAudioState("channel", player);
   assert.equal(player.muted, true);
-  app.setActiveAudioChannel("channel");
+  assert.equal(player.volume, 0.5);
+  player.muted = false;
+  player.volume = 0.23;
+  app.capturePlayerAudioState("channel", player);
+  player.muted = true; player.volume = 1;
+  app.applyPlayerAudioState("channel", player);
   assert.equal(player.muted, false);
   assert.equal(player.volume, 0.23);
+  player.muted = true; player.volume = 0;
+  app.capturePlayerAudioState("channel", player);
+  player.muted = false; player.volume = 1;
+  app.applyPlayerAudioState("channel", player);
+  assert.equal(player.muted, true);
+  assert.equal(player.volume, 0);
+  load().applyPlayerAudioState("channel", player);
+  assert.equal(player.muted, true);
+  assert.equal(player.volume, 0.5);
 });
 
 test("grids fit every tile inside the viewport, shrinking gutters for dense layouts", () => {
@@ -105,9 +115,9 @@ test("add prompt accepts Twitch URLs and Pluto/full selection URLs", () => {
 
 test("Twitch internal viewport meets minimums while the whole player fits its tile", () => {
   const app = load();
-  for (const [width,height] of [[375,105.875],[1280,720],[80,40],[437.5,210.25],[200,800]]) {
+  for (const [width,height] of [[375,105.875],[1280,720],[80,40],[437.5,210.25],[200,800],[400,300],[401,301]]) {
     const viewport = app.getTwitchViewport(width,height);
-    assert.ok(viewport.width>=400 && viewport.height>=300);
+    assert.ok(viewport.width>=402 && viewport.height>=302);
     assert.ok(viewport.scale>0 && viewport.scale<=1);
     assert.ok(viewport.width*viewport.scale<=width+1e-8);
     assert.ok(viewport.height*viewport.scale<=height+1e-8);
@@ -212,7 +222,7 @@ test("an in-flight failure check cannot hide a stream after manual retry", async
 test("repeated playback failures wait for polling after one immediate recovery attempt", () => {
   const app = load();
   vm.runInContext(`
-    const view = {stream:{provider:'twitch'},tile:{hidden:false,dataset:{}},audioButton:{}};
+    const view = {stream:{provider:'twitch'},tile:{hidden:false,dataset:{}}};
     streamViews.set('channel',view);
     let recoveryChecks = 0;
     teardownPlayer=()=>{};showTwitchNotice=()=>{};setChannelStatus=()=>{};syncGridLayout=()=>{};

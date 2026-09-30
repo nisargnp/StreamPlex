@@ -21,13 +21,16 @@ let currentStreams = buildStreamEntries(currentChannels, currentPlutoStream);
 const streamViews = new Map();
 const pillViews = new Map();
 const players = new Map();
-const audioVolumes = new Map();
+// Audio preferences live only for this page load. A browser reload starts muted.
+const audioStates = new Map();
 const probeControllers = new Set();
-const APP_VERSION = "2026-09-27.11";
-const TWITCH_VIEWPORT_WIDTH = 400;
-const TWITCH_VIEWPORT_HEIGHT = 300;
+const APP_VERSION = "2026-09-29.5";
+// CSS zoom can round the iframe's reported viewport down by a pixel.
+// Leave a small buffer above Twitch's 400 × 300 minimum.
+const TWITCH_VIEWPORT_WIDTH = 402;
+const TWITCH_VIEWPORT_HEIGHT = 302;
 const THEME_STORAGE_KEY = "streamplex-theme";
-const DEFAULT_ACTIVE_VOLUME = 0.5;
+const DEFAULT_VOLUME = 0.5;
 const POLL_INTERVAL_MS = 300000;
 const PROBE_TIMEOUT_MS = 8000;
 const FETCH_PROBE_TIMEOUT_MS = 5000;
@@ -39,7 +42,6 @@ const PREVIEW_PLACEHOLDER_PATTERNS = [
   /404_processing/i,
   /forbidden/i,
 ];
-let activeAudioChannel = null;
 let pollTimer = null;
 let pollTicker = null;
 let pollInFlight = false;
@@ -49,8 +51,6 @@ let layoutSyncFrame = null;
 let plutoModulePromise;
 let twitchSdkPromise;
 let pollEpoch = 0;
-let audioMonitor = null;
-let activeAudioVolume = DEFAULT_ACTIVE_VOLUME;
 let activeTheme = getStoredTheme();
 
 applyTheme(activeTheme);
@@ -103,22 +103,6 @@ function bindEvents() {
     });
   }
 
-  if (streamGrid) {
-    streamGrid.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-audio-channel]");
-      if (!button || button.disabled) {
-        return;
-      }
-
-      const channel = button.dataset.audioChannel || "";
-      if (!streamViews.has(channel)) {
-        return;
-      }
-
-      setActiveAudioChannel(channel);
-    });
-  }
-
   window.addEventListener("resize", scheduleGridLayoutSync);
   window.addEventListener("pageshow", handlePageShow);
   window.addEventListener("popstate", () => updateSelection(parseInitialChannels(), parseInitialPlutoStream()));
@@ -127,8 +111,6 @@ function bindEvents() {
     stopStatusPolling();
     [...players.keys()].forEach(teardownPlayer);
     streamViews.forEach(disposePlutoView);
-    window.clearInterval(audioMonitor);
-    audioMonitor = null;
   });
 }
 
@@ -156,7 +138,7 @@ function renderChannelPills() {
 
     const label = document.createElement("span");
     label.className = "channel-pill-label";
-    label.textContent = stream.label;
+    label.textContent = streamViews.get(channel)?.stream.label || stream.label;
 
     const removeButton = document.createElement("button");
     removeButton.className = "channel-pill-remove";
@@ -166,9 +148,11 @@ function renderChannelPills() {
     removeButton.title = `Remove ${channel}`;
     removeButton.textContent = "x";
 
-    pill.append(status, label, removeButton);
+    pill.append(status, label);
+    if (isPlutoStream(stream)) pill.append(createStreamOpenLink(stream));
+    pill.append(removeButton);
     fragment.append(pill);
-    pillViews.set(channel, { pill, status });
+    pillViews.set(channel, { pill, status, label });
   });
 
   channelList.append(fragment);
@@ -187,8 +171,7 @@ function renderStreamTiles() {
     disposePlutoView(view);
     view.tile.remove();
     streamViews.delete(id);
-    audioVolumes.delete(id);
-    if (activeAudioChannel === id) activeAudioChannel = null;
+    audioStates.delete(id);
   });
   currentStreams.forEach((stream, index) => {
     const existing = streamViews.get(stream.id);
@@ -200,38 +183,20 @@ function renderStreamTiles() {
     tile.className = "stream-tile";
     tile.dataset.streamChannel = stream.id;
     tile.dataset.provider = stream.provider;
+    tile.setAttribute("aria-label", stream.label);
     tile.dataset.live = isPlutoStream(stream) ? "true" : "pending";
     tile.dataset.mountPending = "false";
     tile.style.order = String(index);
-
-    const header = document.createElement("header");
-    header.className = "stream-name";
-
-    const label = document.createElement("span");
-    label.className = "stream-name-label";
-    label.textContent = stream.label;
-
-    const action = createStreamAction(stream);
-
-    const audioButton = createAudioButton(stream);
-    if (isPlutoStream(stream)) {
-      const actions = document.createElement("div");
-      actions.className = "stream-actions";
-      actions.append(audioButton, action);
-      header.append(label, actions);
-    } else {
-      header.append(label, audioButton);
-    }
 
     const shell = document.createElement("div");
     shell.className = "player-shell";
     shell.dataset.playerShell = stream.id;
 
-    tile.append(header, shell);
+    tile.append(shell);
     // Never reparent an existing iframe: even moving it can restart playback.
     streamGrid.append(tile);
 
-    const view = { tile, shell, audioButton, stream, userPaused: false, ready: false };
+    const view = { tile, shell, stream, userPaused: false, ready: false };
     streamViews.set(stream.id, view);
 
     if (isPlutoStream(stream)) {
@@ -244,32 +209,16 @@ function renderStreamTiles() {
 
 }
 
-function createStreamAction(stream) {
-  if (isPlutoStream(stream)) {
-    const link = document.createElement("a");
-    link.className = "stream-audio-button stream-open-link";
-    link.href = stream.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = "Open";
-    link.setAttribute("aria-label", `Open ${stream.label} on Pluto TV`);
-    link.title = `Open ${stream.label} on Pluto TV`;
-    return link;
-  }
-
-  return createAudioButton(stream);
-}
-
-function createAudioButton(stream) {
-  const audioButton = document.createElement("button");
-  audioButton.className = "stream-audio-button";
-  audioButton.type = "button";
-  audioButton.dataset.audioChannel = stream.id;
-  audioButton.setAttribute("aria-pressed", "false");
-  audioButton.disabled = true;
-  audioButton.textContent = "Audio";
-  audioButton.setAttribute("aria-label", `Listen to ${stream.label}`);
-  return audioButton;
+function createStreamOpenLink(stream) {
+  const link = document.createElement("a");
+  link.className = "stream-control-button channel-pill-open";
+  link.href = stream.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Open";
+  link.setAttribute("aria-label", `Open ${stream.label} on Pluto TV`);
+  link.title = `Open ${stream.label} on Pluto TV`;
+  return link;
 }
 
 function buildStreamEntries(channels, plutoStream) {
@@ -362,7 +311,6 @@ function updateSelection(channels, plutoStream) {
   renderStreamTiles();
   renderChannelPills();
   syncGridLayout();
-  syncAudioButtons();
   startStatusPolling();
 }
 
@@ -484,7 +432,6 @@ function handlePageShow(event) {
     view.tile.hidden = false;
     view.tile.dataset.live = "pending";
     view.tile.dataset.mountPending = "false";
-    view.audioButton.disabled = true;
     renderShellPlaceholder(view, view.stream.label, "Checking live status", "pending");
     setChannelStatus(channel, "pending");
   });
@@ -669,7 +616,7 @@ function isPlaceholderPreviewUrl(value) {
 
 function retainExistingStreamState(channel) {
   const view = streamViews.get(channel);
-  if (!isTwitchView(view) || !view.shell || !view.audioButton) {
+  if (!isTwitchView(view) || !view.shell) {
     return;
   }
 
@@ -686,7 +633,6 @@ function retainExistingStreamState(channel) {
   view.tile.hidden = false;
   view.tile.dataset.live = "pending";
   view.tile.dataset.mountPending = "false";
-  view.audioButton.disabled = true;
 
   teardownPlayer(channel);
   renderShellPlaceholder(view, view.stream.label, "Checking live status", "pending");
@@ -695,13 +641,12 @@ function retainExistingStreamState(channel) {
 
 function renderLiveStream(channel) {
   const view = streamViews.get(channel);
-  if (!isTwitchView(view) || !view.shell || !view.audioButton) {
+  if (!isTwitchView(view) || !view.shell) {
     return;
   }
 
   view.tile.hidden = false;
   view.tile.dataset.live = "true";
-  view.audioButton.disabled = false;
 
   if (players.has(channel)) {
     return;
@@ -815,11 +760,9 @@ async function mountPlayer(channel, view) {
     on(SDK.Player.READY, () => {
       view.ready = true;
       refreshStatusFromPlayers();
-      view.audioButton.disabled = false;
       initializePlayerQuality(view, player);
       applyPlayerAudioState(channel, player);
       requestPlayerPlayback(channel, player);
-      startAudioMonitor();
     });
     on(SDK.Player.ONLINE, () => {
       view.tile.hidden = false;
@@ -836,7 +779,6 @@ async function mountPlayer(channel, view) {
       view.tile.hidden = true;
       view.tile.dataset.live = "false";
       setChannelStatus(channel, "offline");
-      if (activeAudioChannel === channel) setActiveAudioChannel(null);
       syncGridLayout();
     });
     on(SDK.Player.PLAYING, () => {
@@ -895,12 +837,15 @@ function showTwitchNotice(view, text, action, callback) {
   view.notice?.remove();
   const notice = document.createElement("div");
   notice.className = "player-notice";
+  const channelName = document.createElement("strong");
+  channelName.className = "notice-channel";
+  channelName.textContent = view.stream.label;
   const message = document.createElement("span");
   message.textContent = text;
   message.setAttribute("role", "status");
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "stream-audio-button";
+  button.className = "stream-control-button";
   button.textContent = action;
   button.addEventListener("click", callback);
   const link = document.createElement("a");
@@ -908,7 +853,7 @@ function showTwitchNotice(view, text, action, callback) {
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.textContent = "Open on Twitch";
-  notice.append(message, button, link);
+  notice.append(channelName, message, button, link);
   view.shell.append(notice);
   view.notice = notice;
 }
@@ -920,7 +865,6 @@ function showTwitchFailure(channel, message) {
   view.playbackError = true;
   lastPollState = "error";
   updatePollIndicator();
-  view.audioButton.disabled = true;
   view.tile.hidden = false;
   view.tile.dataset.live = "pending";
   showTwitchNotice(view, message, "Retry playback", () => {
@@ -940,24 +884,21 @@ function showTwitchFailure(channel, message) {
 
 function renderOfflineStream(channel) {
   const view = streamViews.get(channel);
-  if (!isTwitchView(view) || !view.shell || !view.audioButton) {
+  if (!isTwitchView(view) || !view.shell) {
     return;
   }
 
   view.tile.hidden = true;
   view.tile.dataset.live = "false";
   view.tile.dataset.mountPending = "false";
-  view.audioButton.disabled = true;
-
-  if (activeAudioChannel === channel) {
-    clearActiveAudioChannel();
-  }
 
   teardownPlayer(channel);
   renderShellPlaceholder(view, view.stream.label, "Offline", "offline");
 }
 
 function disposePlutoView(view) {
+  const video = isPlutoView(view) && view.shell?.querySelector("video");
+  if (video) audioStates.set(view.stream.id, { muted: video.muted, volume: video.volume });
   view.plutoGeneration = (view.plutoGeneration || 0) + 1;
   view.disposePluto?.();
   view.disposePluto = null;
@@ -987,18 +928,21 @@ async function renderPlutoStream(view) {
       await plutoModulePromise;
     }
     if (generation !== view.plutoGeneration) return;
+    const state = audioStates.get(view.stream.id) || { muted: true, volume: DEFAULT_VOLUME };
     view.disposePluto = window.StreamplexPluto.mount(view.shell, view.stream.streamId, {
-      onReady: () => { view.audioButton.disabled = false; syncAudioButtons(); },
-      onAudioChange: ({ muted, volume }) => {
-        audioVolumes.set(view.stream.id, volume);
-        if (!muted && volume > 0 && activeAudioChannel !== view.stream.id) setActiveAudioChannel(view.stream.id, false);
-        else if ((muted || volume === 0) && activeAudioChannel === view.stream.id) setActiveAudioChannel(null);
+      channelLabel: `${view.stream.label} (${view.stream.streamId})`,
+      onChannelName: (name) => {
+        if (generation !== view.plutoGeneration) return;
+        view.stream.label = name;
+        view.tile.setAttribute("aria-label", name);
+        const pill = pillViews.get(view.stream.id);
+        if (pill?.label) pill.label.textContent = name;
       },
     });
     const video = view.shell.querySelector("video");
     if (video) {
-      video.volume = audioVolumes.get(view.stream.id) ?? DEFAULT_ACTIVE_VOLUME;
-      video.muted = activeAudioChannel !== view.stream.id;
+      video.volume = state.volume;
+      video.muted = state.muted;
     }
   } catch (error) {
     if (generation === view.plutoGeneration) {
@@ -1032,6 +976,7 @@ function renderShellPlaceholder(view, channel, message, state) {
 function teardownPlayer(channel) {
   const view = streamViews.get(channel);
   const player = players.get(channel);
+  if (view?.ready && player) capturePlayerAudioState(channel, player);
   // Invalidate callbacks before destroy/pause can synchronously emit events.
   players.delete(channel);
   if (view) {
@@ -1048,7 +993,6 @@ function teardownPlayer(channel) {
   try { player?.destroy?.(); } catch { /* Complete our cleanup even if the SDK fails. */ }
   view?.shell.querySelector(".player-mount")?.remove();
   if (view) view.playerMount = null;
-  if (!players.size) { window.clearInterval(audioMonitor); audioMonitor = null; }
 }
 
 function setChannelStatus(channel, state) {
@@ -1063,111 +1007,26 @@ function setChannelStatus(channel, state) {
     state === "offline" ? "Offline" : state === "pending" ? "Checking live status" : "";
 }
 
-function setActiveAudioChannel(channel, toggle = true) {
-  captureActiveAudioVolume();
-  activeAudioChannel = toggle && activeAudioChannel === channel ? null : channel;
-  activeAudioVolume = audioVolumes.get(activeAudioChannel) ?? DEFAULT_ACTIVE_VOLUME;
-  syncPlayerAudio({ forceActiveVolume: true });
-  syncAudioButtons();
-}
-
-function clearActiveAudioChannel() {
-  setActiveAudioChannel(null);
-}
-
-function syncPlayerAudio(options = {}) {
-  if (!options.forceActiveVolume) {
-    captureActiveAudioVolume();
-  }
-
-  players.forEach((player, channel) => {
-    if (streamViews.get(channel)?.ready) applyPlayerAudioState(channel, player);
-  });
-  streamViews.forEach((view, id) => {
-    if (!isPlutoView(view)) return;
-    const video = view.shell.querySelector("video");
-    if (video) {
-      video.muted = id !== activeAudioChannel;
-      if (id === activeAudioChannel) video.volume = activeAudioVolume;
-    }
-  });
-}
-
-function captureActiveAudioVolume() {
-  if (!activeAudioChannel) {
-    return;
-  }
-
-  const view = streamViews.get(activeAudioChannel);
-  if (isPlutoView(view)) {
-    const video = view.shell.querySelector("video");
-    if (video) activeAudioVolume = video.volume;
-  } else {
-    capturePlayerAudioVolume(players.get(activeAudioChannel));
-  }
-  audioVolumes.set(activeAudioChannel, activeAudioVolume);
-}
-
-function capturePlayerAudioVolume(player) {
-  if (!player || typeof player.getVolume !== "function") {
-    return;
-  }
-
+function capturePlayerAudioState(channel, player) {
   try {
-    const nextVolume = Number(player.getVolume());
-    if (Number.isFinite(nextVolume)) {
-      activeAudioVolume = clampVolume(nextVolume);
+    const volume = Number(player.getVolume());
+    const muted = player.getMuted();
+    if (Number.isFinite(volume) && typeof muted === "boolean") {
+      audioStates.set(channel, { muted, volume: Math.min(Math.max(volume, 0), 1) });
     }
-  } catch (error) {
-    // Some player states do not expose volume yet; keep the last known active volume.
-  }
-}
-
-function clampVolume(value) {
-  return Math.min(Math.max(value, 0), 1);
+  } catch { /* Keep the previous settings if a failing player cannot report them. */ }
 }
 
 function applyPlayerAudioState(channel, player) {
-  const isActive = channel === activeAudioChannel;
-
-  if (typeof player.setMuted === "function") {
-    player.setMuted(!isActive);
-  }
-
-  if (typeof player.setVolume === "function") {
-    // Muting must not erase the user's selected volume.
-    if (isActive) player.setVolume(activeAudioVolume);
-  }
+  const state = audioStates.get(channel) || { muted: true, volume: DEFAULT_VOLUME };
+  player.setMuted?.(state.muted);
+  player.setVolume?.(state.volume);
 }
 
 function requestPlayerPlayback(channel, player, options = {}) {
   const view = streamViews.get(channel);
   if (!view?.ready || view.userPaused || view.tile.hidden) return;
   safelyPlayPlayer(player);
-}
-
-function startAudioMonitor() {
-  if (audioMonitor) return;
-  // Twitch has no documented volume-change event. Observe transitions, not
-  // stale command acknowledgements, to include its native mute controls.
-  audioMonitor = window.setInterval(() => {
-    players.forEach((player, id) => {
-      const view = streamViews.get(id);
-      if (!view?.ready) return;
-      try {
-        const snapshot = { muted: player.getMuted(), volume: player.getVolume() };
-        const previous = view.audioSnapshot;
-        view.audioSnapshot = snapshot;
-        if (!previous) return;
-        if (!snapshot.muted && snapshot.volume > 0 && (previous.muted || previous.volume === 0)) {
-          audioVolumes.set(id, snapshot.volume);
-          if (activeAudioChannel !== id) setActiveAudioChannel(id, false);
-        } else if (activeAudioChannel === id && (snapshot.muted || snapshot.volume === 0)) {
-          setActiveAudioChannel(null);
-        } else if (activeAudioChannel === id) audioVolumes.set(id, snapshot.volume);
-      } catch { /* Player is transitioning; try the next tick. */ }
-    });
-  }, 1000);
 }
 
 function applyPlayerQualityPreference(player) {
@@ -1218,20 +1077,6 @@ function pickPreferredQuality(qualities) {
 function extractQualityFps(quality) {
   const match = quality.match(/^480p(\d+)$/i);
   return match ? Number.parseInt(match[1], 10) || 0 : 0;
-}
-
-function syncAudioButtons() {
-  streamViews.forEach((view, channel) => {
-    if (!view.audioButton) {
-      return;
-    }
-
-    const isActive = channel === activeAudioChannel;
-    view.audioButton.classList.toggle("active", isActive);
-    view.audioButton.setAttribute("aria-pressed", isActive ? "true" : "false");
-    view.audioButton.textContent = isActive ? "On" : "Audio";
-    view.audioButton.setAttribute("aria-label", isActive ? `Mute ${view.stream.label}` : `Listen to ${view.stream.label}`);
-  });
 }
 
 function getStoredTheme() {
@@ -1354,8 +1199,6 @@ function syncGridLayout() {
   );
 
   streamGrid.classList.add("stream-grid-dynamic");
-  // At very small sizes, reserve the tile for video rather than its toolbar.
-  streamGrid.classList.toggle("stream-grid-compact", tileHeight < 64);
   streamGrid.style.setProperty("--dynamic-grid-gap", `${fittedGap}px`);
   streamGrid.style.setProperty("--dynamic-tile-width", `${tileWidth}px`);
   streamGrid.style.setProperty("--dynamic-tile-height", `${tileHeight}px`);

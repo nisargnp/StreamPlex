@@ -86,11 +86,12 @@
     video.setAttribute("aria-label", "Pluto TV live video");
     const notice = document.createElement("div");
     notice.className = "pluto-notice";
+    let channelName = callbacks.channelLabel || `Pluto TV (${streamId})`;
     const message = document.createElement("span");
     message.setAttribute("role", "status");
     const retry = document.createElement("button");
     retry.type = "button";
-    retry.className = "stream-audio-button";
+    retry.className = "stream-control-button";
     retry.textContent = "Retry playback";
     notice.append(message, retry);
     shell.replaceChildren(video, notice);
@@ -117,7 +118,7 @@
     }
 
     function show(text, canRetry = false) {
-      message.textContent = text;
+      message.textContent = `${channelName}: ${text}`;
       notice.hidden = false;
       retry.hidden = !canRetry;
     }
@@ -165,6 +166,10 @@
         if (!response.ok) throw new Error("Pluto's playback service is unavailable. Retry, or use Open to watch on Pluto TV.");
         const session = parseSession(await response.json(), channelId);
         if (disposed || current !== attempt) return;
+        if (session.name) {
+          channelName = session.name;
+          callbacks.onChannelName?.(channelName);
+        }
         video.setAttribute("aria-label", `${session.name || "Pluto TV"} live video`);
         // Prefer MSE: some Chrome versions report native HLS support but fail
         // on Pluto's playlists. A canPlayType result alone is not sufficient.
